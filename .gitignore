@@ -1,0 +1,24 @@
+# Build artifacts
+/bin/
+/dist/
+*.test
+*.test.exe
+
+# Test coverage and profiling
+coverage.out
+coverage.html
+*.coverprofile
+*.prof
+*.pprof
+
+# Local Go workspace
+/go.work
+/go.work.sum
+
+# Local configuration and editor files
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.DS_Store
