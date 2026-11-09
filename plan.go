@@ -13,6 +13,9 @@ type Statement struct {
 	SQL         string `json:"sql"`
 	Destructive bool   `json:"destructive"`
 	SkipExplain bool   `json:"skip_explain"`
+	// OutsideTransaction requires autocommit before subsequent statements, for
+	// example so newly added PostgreSQL enum values become visible.
+	OutsideTransaction bool `json:"outside_transaction"`
 }
 
 // Plan contains SQL statements in execution order. Its zero value is an empty plan.
@@ -22,6 +25,8 @@ type Plan struct {
 
 // SQL returns commands in order, each terminated by a semicolon and newline.
 // Surrounding whitespace and empty commands are omitted; command bodies are preserved.
+// Execute Statements respecting OutsideTransaction; this rendering does not
+// encode transaction boundaries.
 func (p Plan) SQL() string {
 	var out strings.Builder
 	for _, statement := range p.Statements {

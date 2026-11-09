@@ -12,8 +12,8 @@ import (
 	"github.com/schemigo/schemigo"
 )
 
-// Driver reads PostgreSQL catalogs. Migration operations are not implemented yet
-// and return errors.ErrUnsupported. Its zero value is ready for inspection.
+// Driver inspects PostgreSQL and plans enum and extension changes.
+// Other migration operations return errors.ErrUnsupported. Its zero value is ready for use.
 type Driver struct{}
 
 var _ schemigo.Driver = (*Driver)(nil)
@@ -34,11 +34,6 @@ func Open(dsn string) (*sql.DB, error) {
 
 // Name returns the dialect identifier.
 func (*Driver) Name() string { return "postgres" }
-
-// Diff is not implemented yet.
-func (*Driver) Diff(context.Context, *sql.Conn, schemigo.Schema, schemigo.Schema) (schemigo.Plan, error) {
-	return schemigo.Plan{}, errors.ErrUnsupported
-}
 
 // Validate is not implemented yet.
 func (*Driver) Validate(context.Context, *sql.Conn, schemigo.Statement) error {

@@ -2,7 +2,11 @@
 
 Декларативное управление схемами PostgreSQL, MySQL и ClickHouse.
 
-Реализованы общая модель схемы, `Normalize`, SQL-план с SHA-256 и контракт драйвера. Чтение каталогов PostgreSQL 15+ через `postgres.New().Inspect(ctx, conn, schemaName)` на переданном `*sql.Conn` поддерживает таблицы, enum, extensions, функции, триггеры и views; unit- и интеграционные тесты прошли на PostgreSQL 18. Другие версии PostgreSQL пока не проверены. `postgres.Open`, diff, экспорт и применение миграций ещё не реализованы. CLI выводит сообщение об отсутствии реализации и завершается с кодом 1.
+Реализованы общая модель схемы, `Normalize`, SQL-план с SHA-256, контракт драйвера и `postgres.Open(dsn)` для создания пула pgx из URL или keyword DSN. `Open` проверяет формат DSN без подключения; доступность сервера проверяется через `PingContext`, пул закрывается вызывающим кодом. Чтение каталогов PostgreSQL 15+ через `postgres.New().Inspect(ctx, conn, schemaName)` поддерживает таблицы, enum, extensions, функции, триггеры и views. Diff PostgreSQL поддерживает extensions и enum; изменения других сущностей пока возвращают `errors.ErrUnsupported`. Unit- и интеграционные тесты прошли на PostgreSQL 18; другие версии пока не проверены. Экспорт и применение миграций ещё не реализованы. CLI выводит сообщение об отсутствии реализации и завершается с кодом 1.
+
+`Driver.Diff` только строит план. Extensions создаются и обновляются до заданной версии, лишние не удаляются. Enum поддерживают создание, добавление значений с сохранением порядка, удаление и перестановку значений через пересоздание типа. Пересоздание требует подключения для проверки зависимостей и выполняется одним атомарным DO-блоком: ошибка откатывает временный тип и изменения колонок/defaults. Неизвестные зависимости и существующий временный тип не удаляются; изменение owner/ACL при пересоздании вызывает отказ, комментарий типа сохраняется.
+
+Для исполнения плана используют `Statements`, учитывая `OutsideTransaction`: добавление enum-значения должно завершиться autocommit до следующего statement, который его использует. `Plan.SQL()` предназначен для просмотра и хеша и не кодирует границы транзакций. Общий Apply пока не реализован.
 
 ## Структура
 
@@ -35,7 +39,7 @@ Unit-тесты модели, валидации, SQL-плана и PostgreSQL i
 
 Интеграционные тесты используют pgx и testcontainers из `go.mod`. Для запуска нужны Docker и команда `SCHEMIGO_TESTCONTAINERS=1 go test -mod=readonly -tags=integration ./...`. Helper создаёт PostgreSQL 18 с изолированными fixtures и удаляет контейнер после теста. Без этой переменной тесты с тегом `integration` собираются и пропускают запуск контейнера.
 
-Inspector исключает `schema_migrations`, объекты расширений и constraint triggers. Поддерживаются триггеры на таблицах и обычных views, включая `INSTEAD OF`; materialized views не могут быть целью триггера. Для свойств вне текущей модели, например identity/generated columns, partitioning, UNIQUE constraints, INCLUDE indexes, cross-schema FK и расширенных опций функций, возвращается ошибка. Остальные методы PostgreSQL Driver пока возвращают `errors.ErrUnsupported`.
+Inspector исключает `schema_migrations`, объекты расширений и constraint triggers. Поддерживаются триггеры на таблицах и обычных views, включая `INSTEAD OF`; materialized views не могут быть целью триггера. Для свойств вне текущей модели, например identity/generated columns, partitioning, UNIQUE constraints, INCLUDE indexes, cross-schema FK и расширенных опций функций, возвращается ошибка. PostgreSQL Validate, Lock и методы истории пока возвращают `errors.ErrUnsupported`.
 
 Требования: [SPEC.md](SPEC.md). Стандарт кода: [CODING_STANDARDS.md](CODING_STANDARDS.md). Этапы: [план реализации](docs/superpowers/plans/2026-11-09-schemigo.md).
 

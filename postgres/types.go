@@ -1,7 +1,5 @@
 package postgres
 
-import "strings"
-
 const (
 	// Int8 is a signed eight-byte integer.
 	Int8 = "bigint"
@@ -18,6 +16,5 @@ const (
 // Nextval returns a default expression for the conventional table_column_seq
 // sequence. Table and column are unqualified names; the result uses search_path.
 func Nextval(table, column string) string {
-	name := `"` + strings.ReplaceAll(table+"_"+column+"_seq", `"`, `""`) + `"`
-	return "nextval('" + strings.ReplaceAll(name, "'", "''") + "'::regclass)"
+	return "nextval(" + QuoteLiteral(QuoteIdent(table+"_"+column+"_seq")) + "::regclass)"
 }

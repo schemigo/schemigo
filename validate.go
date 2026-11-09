@@ -7,20 +7,21 @@ import (
 )
 
 // Normalize returns an independent copy with default index methods, trigger
-// modes and entity order. It preserves object and column order and raw SQL.
+// modes and entity order. Empty slices become nil. It preserves object and
+// column order and raw SQL.
 // Missing entity kinds are appended to Order in the default order. It rejects
 // empty/NUL identifiers, duplicates, invalid local references, conflicting
 // primary key declarations and contradictory trigger modes. An empty Schema is
 // valid; dialect-specific SQL and capabilities are checked by the driver.
 func Normalize(input Schema) (Schema, error) {
 	s := input
-	s.Extensions = slices.Clone(s.Extensions)
-	s.Enums = slices.Clone(s.Enums)
-	s.Tables = slices.Clone(s.Tables)
-	s.Functions = slices.Clone(s.Functions)
-	s.Triggers = slices.Clone(s.Triggers)
-	s.Views = slices.Clone(s.Views)
-	s.Order = slices.Clone(s.Order)
+	s.Extensions = cloneNonempty(s.Extensions)
+	s.Enums = cloneNonempty(s.Enums)
+	s.Tables = cloneNonempty(s.Tables)
+	s.Functions = cloneNonempty(s.Functions)
+	s.Triggers = cloneNonempty(s.Triggers)
+	s.Views = cloneNonempty(s.Views)
+	s.Order = cloneNonempty(s.Order)
 	if s.Name != "" {
 		if err := validName(s.Name); err != nil {
 			return Schema{}, fmt.Errorf("schema: %w", err)
@@ -35,7 +36,7 @@ func Normalize(input Schema) (Schema, error) {
 	enums := nameSet{}
 	for i := range s.Enums {
 		e := &s.Enums[i]
-		e.Values = slices.Clone(e.Values)
+		e.Values = cloneNonempty(e.Values)
 		if err := enums.add(e.Name); err != nil {
 			return Schema{}, fmt.Errorf("enum: %w", err)
 		}
@@ -144,6 +145,13 @@ func Normalize(input Schema) (Schema, error) {
 	return s, nil
 }
 
+func cloneNonempty[T any](values []T) []T {
+	if len(values) == 0 {
+		return nil
+	}
+	return slices.Clone(values)
+}
+
 type nameSet map[string]struct{}
 
 func validName(name string) error {
@@ -165,11 +173,11 @@ func (names nameSet) add(name string) error {
 }
 
 func normalizeTable(t *Table) error {
-	t.Columns = slices.Clone(t.Columns)
-	t.PrimaryKey = slices.Clone(t.PrimaryKey)
-	t.Indexes = slices.Clone(t.Indexes)
-	t.ForeignKeys = slices.Clone(t.ForeignKeys)
-	t.Checks = slices.Clone(t.Checks)
+	t.Columns = cloneNonempty(t.Columns)
+	t.PrimaryKey = cloneNonempty(t.PrimaryKey)
+	t.Indexes = cloneNonempty(t.Indexes)
+	t.ForeignKeys = cloneNonempty(t.ForeignKeys)
+	t.Checks = cloneNonempty(t.Checks)
 	columns := nameSet{}
 	columnPK := 0
 	for _, c := range t.Columns {
@@ -195,7 +203,7 @@ func normalizeTable(t *Table) error {
 	indexes := nameSet{}
 	for i := range t.Indexes {
 		idx := &t.Indexes[i]
-		idx.Columns = slices.Clone(idx.Columns)
+		idx.Columns = cloneNonempty(idx.Columns)
 		if err := indexes.add(idx.Name); err != nil {
 			return fmt.Errorf("index: %w", err)
 		}
@@ -213,8 +221,8 @@ func normalizeTable(t *Table) error {
 	constraints := nameSet{}
 	for i := range t.ForeignKeys {
 		fk := &t.ForeignKeys[i]
-		fk.Columns = slices.Clone(fk.Columns)
-		fk.ReferencedColumns = slices.Clone(fk.ReferencedColumns)
+		fk.Columns = cloneNonempty(fk.Columns)
+		fk.ReferencedColumns = cloneNonempty(fk.ReferencedColumns)
 		if err := constraints.add(fk.Name); err != nil {
 			return fmt.Errorf("foreign key: %w", err)
 		}
