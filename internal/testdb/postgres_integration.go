@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/schemigo/schemigo/postgres"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
@@ -41,7 +41,7 @@ func Postgres(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("pgx", dsn)
+	db, err := postgres.Open(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,7 +5,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/schemigo/schemigo"
 )
 
@@ -17,6 +20,17 @@ var _ schemigo.Driver = (*Driver)(nil)
 
 // New returns a PostgreSQL driver. The caller owns its database connections.
 func New() schemigo.Driver { return &Driver{} }
+
+// Open parses a PostgreSQL URL or keyword DSN and returns a caller-owned pool.
+// It uses pgx defaults, including environment variables, and does not connect.
+// Use PingContext to check connectivity, and Close to release the pool.
+func Open(dsn string) (*sql.DB, error) {
+	config, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
+	}
+	return stdlib.OpenDB(*config), nil
+}
 
 // Name returns the dialect identifier.
 func (*Driver) Name() string { return "postgres" }
