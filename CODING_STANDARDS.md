@@ -29,7 +29,8 @@ This document defines the coding rules for `schemigo`. It draws on the [Uber Go 
 
 ## Code and errors
 
-- Format Go files with `gofmt`. Use clear names, a consistent style within each package, early returns, and narrow variable scope. Avoid shadowing built-in names without good reason.
+- Format all Go packages uniformly with `go fmt -mod=readonly ./...` from the repository root after editing code and before finishing a change. This includes tests and examples. Run `gofmt -w` on Go files excluded by build tags as well. Use the formatter from the Go version declared in `go.mod`; do not maintain custom spacing or alignment or introduce a different formatter. Check that `gofmt -l .` produces no output. SQL inside raw strings is formatted manually and is not rewritten by `go fmt`.
+- Use clear names, a consistent style within each package, early returns, and narrow variable scope. Avoid shadowing built-in names without good reason.
 - Handle errors where there is enough context to decide what to do. When returning an error, add useful context with `fmt.Errorf("operation: %w", err)`; handle each error once. Use `errors.Is` or `errors.As` for error checks, never string matching. Do not use `panic` for ordinary errors.
 - Check type assertions with `value, ok := x.(T)` unless the type is guaranteed by the contract.
 - Use `defer` near resource acquisition for cleanup. Handle close errors when they affect data integrity.
@@ -58,6 +59,6 @@ This document defines the coding rules for `schemigo`. It draws on the [Uber Go 
 ## Checks before a PR
 
 1. Review affected callers, public APIs, tests, and documentation. Check compatibility and data ownership.
-2. Run `gofmt` on changed Go files, `go vet ./...`, and `go test ./...`.
+2. Run `go fmt -mod=readonly ./...`, verify that `gofmt -l .` is empty, then run `go vet -mod=readonly ./...` and `go test -mod=readonly ./...`.
 3. For concurrent code, run `go test -race ./...`. For changes to real integration boundaries, run `go test -tags=integration ./...` in a prepared environment.
 4. For performance changes, provide comparable before-and-after benchmarks. State the trade-offs if the new implementation is more complex.
