@@ -87,11 +87,26 @@ func Normalize(input Schema) (Schema, error) {
 		functions[key] = struct{}{}
 		functionNames[f.Name] = true
 	}
+	views := nameSet{}
+	triggerViews := nameSet{}
+	for _, v := range s.Views {
+		if err := views.add(v.Name); err != nil {
+			return Schema{}, fmt.Errorf("view: %w", err)
+		}
+		if _, ok := tables[v.Name]; ok {
+			return Schema{}, fmt.Errorf("view %q conflicts with table name", v.Name)
+		}
+		if !v.Materialized {
+			triggerViews[v.Name] = struct{}{}
+		}
+	}
 	triggers := map[string]nameSet{}
 	for i := range s.Triggers {
 		tr := &s.Triggers[i]
-		if _, ok := tables[tr.Table]; !ok {
-			return Schema{}, fmt.Errorf("trigger %q: unknown table %q", tr.Name, tr.Table)
+		_, tableExists := tables[tr.Table]
+		_, viewExists := triggerViews[tr.Table]
+		if !tableExists && !viewExists {
+			return Schema{}, fmt.Errorf("trigger %q: unknown table or ordinary view %q", tr.Name, tr.Table)
 		}
 		if triggers[tr.Table] == nil {
 			triggers[tr.Table] = nameSet{}
@@ -112,15 +127,6 @@ func Normalize(input Schema) (Schema, error) {
 			return Schema{}, fmt.Errorf("trigger %q: ForEach conflicts with ForEachRow", tr.Name)
 		}
 		tr.ForEachRow = tr.ForEach == "ROW"
-	}
-	views := nameSet{}
-	for _, v := range s.Views {
-		if err := views.add(v.Name); err != nil {
-			return Schema{}, fmt.Errorf("view: %w", err)
-		}
-		if _, ok := tables[v.Name]; ok {
-			return Schema{}, fmt.Errorf("view %q conflicts with table name", v.Name)
-		}
 	}
 	defaults := []EntityKind{EntityExtensions, EntityEnums, EntityTables, EntityFunctions, EntityTriggers, EntityViews}
 	seen := map[EntityKind]bool{}

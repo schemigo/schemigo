@@ -62,7 +62,8 @@ SELECT object, reason FROM (
  SELECT c.relname || '.' || con.conname, 'constraint options or UNIQUE/EXCLUDE constraint'
  FROM relations c JOIN pg_catalog.pg_constraint con ON con.conrelid = c.oid
  WHERE con.contype IN ('u', 'x') OR (con.contype IN ('p', 'f', 'c') AND
- (con.condeferrable OR con.condeferred OR NOT con.convalidated OR con.connoinherit))
+ (con.condeferrable OR con.condeferred OR NOT con.convalidated))
+ OR (con.contype = 'c' AND con.connoinherit)
  OR (con.contype = 'f' AND (con.confmatchtype <> 's' OR con.confdelsetcols IS NOT NULL OR
   (SELECT r.relnamespace FROM pg_catalog.pg_class r WHERE r.oid = con.confrelid) <> c.relnamespace))
 ) unsupported ORDER BY object LIMIT 1`
@@ -84,5 +85,5 @@ WHERE NOT t.tgisinternal AND t.tgconstraint = 0
   WHERE d.classid = 'pg_catalog.pg_trigger'::regclass AND d.objid = t.oid AND d.deptype = 'e')
  AND (t.tgnargs <> 0 OR cardinality(t.tgattr::smallint[]) <> 0
   OR t.tgoldtable IS NOT NULL OR t.tgnewtable IS NOT NULL OR t.tgenabled <> 'O'
-  OR p.pronamespace <> c.relnamespace OR c.relkind <> 'r')
+  OR p.pronamespace <> c.relnamespace OR c.relkind NOT IN ('r', 'v'))
 ORDER BY c.relname, t.tgname LIMIT 1`

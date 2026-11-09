@@ -65,7 +65,7 @@ func (*Driver) Inspect(ctx context.Context, conn *sql.Conn, name string) (schema
 	if schema.Functions, err = inspectJSON[schemigo.Function](ctx, tx, name, functionsQuery); err != nil {
 		return schema, fmt.Errorf("inspect functions: %w", err)
 	}
-	if schema.Triggers, err = inspectJSON[schemigo.Trigger](ctx, tx, name, triggersQuery); err != nil {
+	if schema.Triggers, err = inspectTriggers(ctx, tx, name); err != nil {
 		return schema, fmt.Errorf("inspect triggers: %w", err)
 	}
 	if schema.Views, err = inspectJSON[schemigo.View](ctx, tx, name, viewsQuery); err != nil {

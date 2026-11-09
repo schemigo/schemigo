@@ -111,7 +111,7 @@ type Function struct {
 	Body       string `json:"body"`
 }
 
-// Trigger describes a trigger on a managed Table calling a managed Function.
+// Trigger describes a trigger on a managed table or ordinary view calling a managed Function.
 // When and Event are dialect clauses; Condition is raw SQL. ForEach is ROW
 // (the default) or STATEMENT and is authoritative over the legacy ForEachRow.
 type Trigger struct {

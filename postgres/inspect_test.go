@@ -52,22 +52,28 @@ func (c *catalogConn) QueryContext(_ context.Context, q string, args []driver.Na
 	if len(c.values) >= len(c.queries) {
 		value = c.values[len(c.queries)-1]
 	}
-	return &catalogRows{value: value}, nil
+	if values, ok := value.([]driver.Value); ok {
+		return &catalogRows{values: values}, nil
+	}
+	if value == nil {
+		return &catalogRows{}, nil
+	}
+	return &catalogRows{values: []driver.Value{value}}, nil
 }
 
 type catalogRows struct {
-	value driver.Value
-	done  bool
+	values []driver.Value
+	index  int
 }
 
 func (*catalogRows) Columns() []string { return []string{"catalog"} }
 func (*catalogRows) Close() error      { return nil }
 func (r *catalogRows) Next(dest []driver.Value) error {
-	if r.done || r.value == nil {
+	if r.index == len(r.values) {
 		return io.EOF
 	}
-	dest[0] = r.value
-	r.done = true
+	dest[0] = r.values[r.index]
+	r.index++
 	return nil
 }
 

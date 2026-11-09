@@ -166,3 +166,31 @@ func ExampleNormalize() {
 	fmt.Println(s.Name, s.Tables[0].Columns[0].Name)
 	// Output: public id
 }
+
+func TestNormalizeViewTrigger(t *testing.T) {
+	for _, materialized := range []bool{false, true} {
+		name := "ordinary view"
+		if materialized {
+			name = "materialized view"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := testSchema()
+			s.Views[0].Materialized = materialized
+			s.Triggers[0].Table = "active"
+			s.Triggers[0].When = "INSTEAD OF"
+			got, err := schemigo.Normalize(s)
+			if materialized {
+				if err == nil {
+					t.Fatal("accepted trigger on materialized view")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Triggers[0].Table != "active" || got.Triggers[0].When != "INSTEAD OF" || !got.Triggers[0].ForEachRow {
+				t.Fatalf("view trigger = %+v", got.Triggers[0])
+			}
+		})
+	}
+}
