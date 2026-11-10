@@ -4,52 +4,105 @@ package testdb
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/schemigo/schemigo/postgres"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
-// Postgres starts an isolated PostgreSQL 18 container only when
-// SCHEMIGO_TESTCONTAINERS=1. Cleanup closes the database and removes the container.
+var server struct {
+	once      sync.Once
+	container *tcpostgres.PostgresContainer
+	config    *pgx.ConnConfig
+	db        *sql.DB
+	err       error
+}
+
+// Run runs a package's tests and removes its shared PostgreSQL container afterward.
+// Call os.Exit(testdb.Run(m)) from TestMain. The container starts lazily in Postgres.
+func Run(m *testing.M) int {
+	code := m.Run()
+	if server.db != nil {
+		if err := server.db.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "close postgres admin:", err)
+			code = 1
+		}
+	}
+	if server.container != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := server.container.Terminate(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "remove postgres container:", err)
+			code = 1
+		}
+	}
+	return code
+}
+
+func startPostgres() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	server.container, server.err = tcpostgres.Run(ctx, "postgres:18-alpine",
+		tcpostgres.WithDatabase("schemigo"), tcpostgres.WithUsername("schemigo"),
+		tcpostgres.WithPassword("schemigo"), tcpostgres.BasicWaitStrategies())
+	if server.err != nil {
+		return
+	}
+	dsn, err := server.container.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		server.err = err
+		return
+	}
+	server.config, server.err = pgx.ParseConfig(dsn)
+	if server.err != nil {
+		return
+	}
+	server.db = stdlib.OpenDB(*server.config)
+	server.err = server.db.PingContext(ctx)
+}
+
+// Postgres returns a fresh database on the package's shared PostgreSQL 18 container.
+// It skips without SCHEMIGO_TESTCONTAINERS=1. Cleanup closes and drops the database.
+// Use Run in TestMain to remove the container. Cluster-wide roles remain shared.
 func Postgres(t *testing.T) *sql.DB {
 	t.Helper()
 	if os.Getenv("SCHEMIGO_TESTCONTAINERS") != "1" {
 		t.Skip("set SCHEMIGO_TESTCONTAINERS=1 to allow disposable database fixtures")
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	server.once.Do(startPostgres)
+	if server.err != nil {
+		t.Fatalf("start postgres: %v", server.err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	container, err := tcpostgres.Run(ctx, "postgres:18-alpine",
-		tcpostgres.WithDatabase("schemigo"), tcpostgres.WithUsername("schemigo"),
-		tcpostgres.WithPassword("schemigo"), tcpostgres.BasicWaitStrategies())
-	if container != nil {
-		t.Cleanup(func() {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := container.Terminate(cleanupCtx); err != nil {
-				t.Errorf("remove postgres container: %v", err)
-			}
-		})
+	name := "test_" + rand.Text()
+	if _, err := server.db.ExecContext(ctx, "CREATE DATABASE "+postgres.QuoteIdent(name)+" TEMPLATE template0"); err != nil {
+		t.Fatalf("create test database: %v", err)
 	}
-	if err != nil {
-		t.Fatalf("start postgres: %v", err)
-	}
-	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatal(err)
-	}
-	db, err := postgres.Open(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var db *sql.DB
 	t.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			t.Errorf("close postgres: %v", err)
+		if db != nil {
+			if err := db.Close(); err != nil {
+				t.Errorf("close postgres: %v", err)
+			}
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := server.db.ExecContext(cleanupCtx, "DROP DATABASE "+postgres.QuoteIdent(name)+" WITH (FORCE)"); err != nil {
+			t.Errorf("drop test database: %v", err)
 		}
 	})
+	config := server.config.Copy()
+	config.Database = name
+	db = stdlib.OpenDB(*config)
 	if err := db.PingContext(ctx); err != nil {
 		t.Fatal(err)
 	}

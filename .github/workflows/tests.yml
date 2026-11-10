@@ -52,44 +52,78 @@ jobs:
         env:
           TEST_OUTCOME: ${{ steps.tests.outcome }}
         run: |
-          {
-            printf '## Tests: %s\n\n' "$TEST_OUTCOME"
-            if [[ -f "$RUNNER_TEMP/test-results.json" ]]; then
-              jq -rs '
-                def count_tests(action): [.[] | select(.Test != null and .Action == action)] | length;
-                def status_label:
-                  if . == "pass" then "✅ pass"
-                  elif . == "fail" or . == "build-fail" then "❌ " + .
-                  elif . == "skip" then "⏭️ skip"
-                  else "⚠️ " + . end;
-                "| Package | Status | Passed | Failed | Skipped |",
-                "| --- | --- | ---: | ---: | ---: |",
-                (group_by(.Package // .ImportPath)[]
-                  | "| <code>" + ((.[0].Package // .[0].ImportPath // "Go build") | @html)
-                    + "</code> | "
-                    + ([.[] | select(.Test == null and (.Action == "pass" or .Action == "fail" or .Action == "skip" or .Action == "build-fail"))] | last | .Action // "incomplete" | status_label)
-                    + " | \(count_tests("pass")) | \(count_tests("fail")) | \(count_tests("skip")) |"),
-                "| **Total** | | \(count_tests("pass")) | \(count_tests("fail")) | \(count_tests("skip")) |",
-                "\nCounts include subtests. Package/build failures are shown separately below.\n"
-              ' "$RUNNER_TEMP/test-results.json"
-              jq -rs '
-                group_by([.Package // .ImportPath, .Test])
-                | .[]
-                | select(any(.Action == "fail" or .Action == "build-fail"))
-                | "<h3>❌ " + ((.[0].Package // .[0].ImportPath // "Go build") | @html)
-                  + (if .[0].Test then " / " + (.[0].Test | @html) else " (package/build)" end)
-                  + "</h3>\n<pre>" + (map(.Output // "") | join("") | @html) + "</pre>\n"
-              ' "$RUNNER_TEMP/test-results.json"
-            else
-              printf 'Tests did not start. See the failed setup step in the job log.\n\n'
-            fi
-            if [[ -s "$RUNNER_TEMP/test-stderr.log" ]]; then
-              printf '<details><summary>Go command diagnostics</summary>\n\n'
-              jq -Rrs '"<pre>" + @html + "</pre>"' "$RUNNER_TEMP/test-stderr.log"
-              printf '\n</details>\n\n'
-            fi
-            printf '\nFull test output and coverage are saved in the test-results artifact.\n'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+          for format in summary log; do
+            {
+              if [[ $format == summary ]]; then
+                printf '## Tests: %s\n\n' "$TEST_OUTCOME"
+              else
+                printf 'Tests: %s\n\n' "$TEST_OUTCOME"
+              fi
+              if [[ -f "$RUNNER_TEMP/test-results.json" ]]; then
+                jq -rs --arg format "$format" '
+                  def count_tests(action): [.[] | select(.Test != null and .Action == action)] | length;
+                  def package_result:
+                    [.[] | select(.Test == null and (.Action == "pass" or .Action == "fail" or .Action == "skip" or .Action == "build-fail"))] | last // {};
+                  def duration:
+                    if . == null then "n/a"
+                    elif . < 0.001 then "<0.001s"
+                    else "\((. * 1000 | round) / 1000)s" end;
+                  def status_label:
+                    if . == "pass" then "✅ pass"
+                    elif . == "fail" or . == "build-fail" then "❌ " + .
+                    elif . == "skip" then "⏭️ skip"
+                    else "⚠️ " + . end;
+                  if $format == "summary" then
+                  "| Package | Status | Passed | Failed | Skipped | Duration |",
+                  "| --- | --- | ---: | ---: | ---: | ---: |",
+                  (group_by(.Package // .ImportPath)[]
+                    | "| <code>" + ((.[0].Package // .[0].ImportPath // "Go build") | @html)
+                      + "</code> | "
+                      + (package_result | .Action // "incomplete" | status_label)
+                      + " | \(count_tests("pass")) | \(count_tests("fail")) | \(count_tests("skip")) | \(package_result | .Elapsed | duration) |"),
+                  "| **Total** | | \(count_tests("pass")) | \(count_tests("fail")) | \(count_tests("skip")) | — |"
+                  else
+                  (group_by(.Package // .ImportPath)[]
+                    | (package_result | .Action // "incomplete" | status_label)
+                      + "  " + (.[0].Package // .[0].ImportPath // "Go build")
+                      + "  [\(package_result | .Elapsed | duration)]\n"
+                      + "  passed=\(count_tests("pass"))  failed=\(count_tests("fail"))  skipped=\(count_tests("skip"))\n"),
+                  "TOTAL  passed=\(count_tests("pass"))  failed=\(count_tests("fail"))  skipped=\(count_tests("skip"))"
+                  end,
+                  "\nCounts include subtests. Package/build failures are shown separately below.\n"
+                ' "$RUNNER_TEMP/test-results.json"
+                jq -rs --arg format "$format" '
+                  group_by([.Package // .ImportPath, .Test])
+                  | .[]
+                  | select(any(.Action == "fail" or .Action == "build-fail"))
+                  | if $format == "summary" then
+                    "<h3>❌ " + ((.[0].Package // .[0].ImportPath // "Go build") | @html)
+                    + (if .[0].Test then " / " + (.[0].Test | @html) else " (package/build)" end)
+                    + "</h3>\n<pre>" + (map(.Output // "") | join("") | @html) + "</pre>\n"
+                    else
+                    "❌ " + (.[0].Package // .[0].ImportPath // "Go build")
+                      + " / " + (.[0].Test // "package/build") + "\n"
+                      + (map(.Output // "") | join(""))
+                    end
+                ' "$RUNNER_TEMP/test-results.json"
+              else
+                printf 'Tests did not start. See the failed setup step in the job log.\n\n'
+              fi
+              if [[ -s "$RUNNER_TEMP/test-stderr.log" ]]; then
+                if [[ $format == summary ]]; then
+                  printf '<details><summary>Go command diagnostics</summary>\n\n'
+                  jq -Rrs '"<pre>" + @html + "</pre>"' "$RUNNER_TEMP/test-stderr.log"
+                  printf '\n</details>\n\n'
+                else
+                  printf 'Go command diagnostics:\n'
+                  cat "$RUNNER_TEMP/test-stderr.log"
+                fi
+              fi
+              printf '\nFull test output and coverage are saved in the test-results artifact.\n'
+            } > "$RUNNER_TEMP/test-report-$format.txt"
+          done
+          cat "$RUNNER_TEMP/test-report-summary.txt" >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/test-report-log.txt"
           if [[ -n ${GITHUB_RUN_ID:-} ]]; then
             printf '\nFormatted report: %s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
           fi

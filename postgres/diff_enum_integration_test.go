@@ -361,7 +361,9 @@ func TestEnumMetadata(t *testing.T) {
 	if comment != "keep 'quoted' comment" {
 		t.Fatalf("comment changed: %q", comment)
 	}
-	execFixture(t, db, `CREATE ROLE enum_owner; ALTER TYPE public.status ADD VALUE 'b'; ALTER TYPE public.status OWNER TO enum_owner`)
+	execFixture(t, db, `CREATE ROLE enum_owner`)
+	defer execFixture(t, db, `REASSIGN OWNED BY enum_owner TO schemigo; DROP ROLE enum_owner`)
+	execFixture(t, db, `ALTER TYPE public.status ADD VALUE 'b'; ALTER TYPE public.status OWNER TO enum_owner`)
 	p = planEnum(t, db, "a")
 	if _, err := db.ExecContext(t.Context(), p.Statements[0].SQL); err == nil {
 		t.Fatal("rebuild changed type ownership")
