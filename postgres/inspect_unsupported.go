@@ -44,7 +44,7 @@ SELECT object, reason FROM (
  FROM relations c WHERE c.relkind IN ('p', 'f') OR c.relispartition
  OR c.relrowsecurity OR c.relforcerowsecurity OR c.reloptions IS NOT NULL
  OR c.reltablespace <> 0 OR c.relpersistence <> 'p'
- OR EXISTS (SELECT FROM pg_catalog.pg_inherits i WHERE i.inhrelid = c.oid)
+ OR EXISTS (SELECT FROM pg_catalog.pg_inherits i WHERE i.inhrelid = c.oid OR i.inhparent = c.oid)
  UNION ALL
  SELECT c.relname || '.' || a.attname, 'identity, generated column or custom collation'
  FROM relations c JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid

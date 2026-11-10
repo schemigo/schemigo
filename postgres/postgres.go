@@ -1,4 +1,4 @@
-// Package postgres implements PostgreSQL schema inspection.
+// Package postgres implements PostgreSQL schema inspection and migration planning.
 package postgres
 
 import (
@@ -12,7 +12,7 @@ import (
 	"github.com/schemigo/schemigo"
 )
 
-// Driver inspects PostgreSQL and plans enum and extension changes.
+// Driver inspects PostgreSQL and plans table, column, primary key, enum and extension changes.
 // Other migration operations return errors.ErrUnsupported. Its zero value is ready for use.
 type Driver struct{}
 
