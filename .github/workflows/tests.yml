@@ -36,8 +36,14 @@ jobs:
             -coverprofile="$RUNNER_TEMP/coverage.out" -json ./... \
             2> "$RUNNER_TEMP/test-stderr.log" | tee "$RUNNER_TEMP/test-results.json" \
             | jq --unbuffered -r '
-                if .Action == "start" then "PACKAGE START: " + .Package
-                elif .Output then .Output | rtrimstr("\n")
+                def color(code): "\u001b[" + code + "m" + . + "\u001b[0m";
+                if .Action == "start" then ("PACKAGE START: " + .Package) | color("36")
+                elif .Output then
+                  .Output | rtrimstr("\n")
+                  | if test("(^|\n)(\\s*--- FAIL:|FAIL|panic:)") then color("31")
+                    elif test("(^|\n)(\\s*--- PASS:|PASS$|ok[ \\t])") then color("32")
+                    elif test("(^|\n)\\s*--- SKIP:") then color("33")
+                    else . end
                 else empty end
               '
 
@@ -51,12 +57,17 @@ jobs:
             if [[ -f "$RUNNER_TEMP/test-results.json" ]]; then
               jq -rs '
                 def count_tests(action): [.[] | select(.Test != null and .Action == action)] | length;
+                def status_label:
+                  if . == "pass" then "✅ pass"
+                  elif . == "fail" or . == "build-fail" then "❌ " + .
+                  elif . == "skip" then "⏭️ skip"
+                  else "⚠️ " + . end;
                 "| Package | Status | Passed | Failed | Skipped |",
                 "| --- | --- | ---: | ---: | ---: |",
                 (group_by(.Package // .ImportPath)[]
                   | "| <code>" + ((.[0].Package // .[0].ImportPath // "Go build") | @html)
                     + "</code> | "
-                    + ([.[] | select(.Test == null and (.Action == "pass" or .Action == "fail" or .Action == "skip" or .Action == "build-fail"))] | last | .Action // "incomplete")
+                    + ([.[] | select(.Test == null and (.Action == "pass" or .Action == "fail" or .Action == "skip" or .Action == "build-fail"))] | last | .Action // "incomplete" | status_label)
                     + " | \(count_tests("pass")) | \(count_tests("fail")) | \(count_tests("skip")) |"),
                 "| **Total** | | \(count_tests("pass")) | \(count_tests("fail")) | \(count_tests("skip")) |",
                 "\nCounts include subtests. Package/build failures are shown separately below.\n"
@@ -65,7 +76,7 @@ jobs:
                 group_by([.Package // .ImportPath, .Test])
                 | .[]
                 | select(any(.Action == "fail" or .Action == "build-fail"))
-                | "<h3>" + ((.[0].Package // .[0].ImportPath // "Go build") | @html)
+                | "<h3>❌ " + ((.[0].Package // .[0].ImportPath // "Go build") | @html)
                   + (if .[0].Test then " / " + (.[0].Test | @html) else " (package/build)" end)
                   + "</h3>\n<pre>" + (map(.Output // "") | join("") | @html) + "</pre>\n"
               ' "$RUNNER_TEMP/test-results.json"
@@ -74,11 +85,14 @@ jobs:
             fi
             if [[ -s "$RUNNER_TEMP/test-stderr.log" ]]; then
               printf '<details><summary>Go command diagnostics</summary>\n\n'
-              jq -Rs '"<pre>" + @html + "</pre>"' "$RUNNER_TEMP/test-stderr.log"
+              jq -Rrs '"<pre>" + @html + "</pre>"' "$RUNNER_TEMP/test-stderr.log"
               printf '\n</details>\n\n'
             fi
             printf '\nFull test output and coverage are saved in the test-results artifact.\n'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [[ -n ${GITHUB_RUN_ID:-} ]]; then
+            printf '\nFormatted report: %s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+          fi
 
       - name: Upload test output and coverage
         if: always()
