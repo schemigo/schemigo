@@ -1,0 +1,185 @@
+name: Tests
+
+on:
+  pull_request:
+    # synchronize fires when commits are pushed to an open PR's branch.
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '0'
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        id: go
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Cache Go modules and compilation
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-build-${{ matrix.goos }}-${{ matrix.goarch }}-go-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ matrix.goos }}-${{ matrix.goarch }}-go-${{ steps.go.outputs.go-version }}-
+
+      - name: Compile all packages and link CLI
+        run: go build -mod=readonly -o "$RUNNER_TEMP/build/" ./...
+
+  tests:
+    name: All tests (PostgreSQL 18)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOTOOLCHAIN: local
+      SCHEMIGO_TESTCONTAINERS: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run unit and integration tests
+        id: tests
+        run: |
+          go test -mod=readonly -race -shuffle=on -tags=integration -count=1 -timeout=10m \
+            -coverprofile="$RUNNER_TEMP/coverage.out" -json ./... \
+            2> "$RUNNER_TEMP/test-stderr.log" | tee "$RUNNER_TEMP/test-results.json" \
+            | jq --unbuffered -r '
+                def color(code): "\u001b[" + code + "m" + . + "\u001b[0m";
+                if .Action == "start" then ("PACKAGE START: " + .Package) | color("36")
+                elif .Output then
+                  .Output | rtrimstr("\n")
+                  | if test("(^|\n)(\\s*--- FAIL:|FAIL|panic:)") then color("31")
+                    elif test("(^|\n)(\\s*--- PASS:|PASS$|ok[ \\t])") then color("32")
+                    elif test("(^|\n)\\s*--- SKIP:") then color("33")
+                    else . end
+                else empty end
+              '
+
+      - name: Report test failures
+        if: always()
+        env:
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+        run: |
+          for format in summary log; do
+            {
+              if [[ $format == summary ]]; then
+                printf '## Tests: %s\n\n' "$TEST_OUTCOME"
+              else
+                printf 'Tests: %s\n\n' "$TEST_OUTCOME"
+              fi
+              if [[ -f "$RUNNER_TEMP/test-results.json" ]]; then
+                jq -rs --arg format "$format" '
+                  def count_tests(action): [.[] | select(.Test != null and .Action == action)] | length;
+                  def package_result:
+                    [.[] | select(.Test == null and (.Action == "pass" or .Action == "fail" or .Action == "skip" or .Action == "build-fail"))] | last // {};
+                  def duration:
+                    if . == null then "n/a"
+                    elif . < 0.001 then "<0.001s"
+                    else "\((. * 1000 | round) / 1000)s" end;
+                  def status_label:
+                    if . == "pass" then "✅ pass"
+                    elif . == "fail" or . == "build-fail" then "❌ " + .
+                    elif . == "skip" then "⏭️ skip"
+                    else "⚠️ " + . end;
+                  if $format == "summary" then
+                  "| Package | Status | Passed | Failed | Skipped | Duration |",
+                  "| --- | --- | ---: | ---: | ---: | ---: |",
+                  (group_by(.Package // .ImportPath)[]
+                    | "| <code>" + ((.[0].Package // .[0].ImportPath // "Go build") | @html)
+                      + "</code> | "
+                      + (package_result | .Action // "incomplete" | status_label)
+                      + " | \(count_tests("pass")) | \(count_tests("fail")) | \(count_tests("skip")) | \(package_result | .Elapsed | duration) |"),
+                  "| **Total** | | \(count_tests("pass")) | \(count_tests("fail")) | \(count_tests("skip")) | — |"
+                  else
+                  (group_by(.Package // .ImportPath)[]
+                    | (package_result | .Action // "incomplete" | status_label)
+                      + "  " + (.[0].Package // .[0].ImportPath // "Go build")
+                      + "  [\(package_result | .Elapsed | duration)]\n"
+                      + "  passed=\(count_tests("pass"))  failed=\(count_tests("fail"))  skipped=\(count_tests("skip"))\n"),
+                  "TOTAL  passed=\(count_tests("pass"))  failed=\(count_tests("fail"))  skipped=\(count_tests("skip"))"
+                  end,
+                  "\nCounts include subtests. Package/build failures are shown separately below.\n"
+                ' "$RUNNER_TEMP/test-results.json"
+                jq -rs --arg format "$format" '
+                  group_by([.Package // .ImportPath, .Test])
+                  | .[]
+                  | select(any(.Action == "fail" or .Action == "build-fail"))
+                  | if $format == "summary" then
+                    "<h3>❌ " + ((.[0].Package // .[0].ImportPath // "Go build") | @html)
+                    + (if .[0].Test then " / " + (.[0].Test | @html) else " (package/build)" end)
+                    + "</h3>\n<pre>" + (map(.Output // "") | join("") | @html) + "</pre>\n"
+                    else
+                    "❌ " + (.[0].Package // .[0].ImportPath // "Go build")
+                      + " / " + (.[0].Test // "package/build") + "\n"
+                      + (map(.Output // "") | join(""))
+                    end
+                ' "$RUNNER_TEMP/test-results.json"
+              else
+                printf 'Tests did not start. See the failed setup step in the job log.\n\n'
+              fi
+              if [[ -s "$RUNNER_TEMP/test-stderr.log" ]]; then
+                if [[ $format == summary ]]; then
+                  printf '<details><summary>Go command diagnostics</summary>\n\n'
+                  jq -Rrs '"<pre>" + @html + "</pre>"' "$RUNNER_TEMP/test-stderr.log"
+                  printf '\n</details>\n\n'
+                else
+                  printf 'Go command diagnostics:\n'
+                  cat "$RUNNER_TEMP/test-stderr.log"
+                fi
+              fi
+              printf '\nFull test output and coverage are saved in the test-results artifact.\n'
+            } > "$RUNNER_TEMP/test-report-$format.txt"
+          done
+          cat "$RUNNER_TEMP/test-report-summary.txt" >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/test-report-log.txt"
+          if [[ -n ${GITHUB_RUN_ID:-} ]]; then
+            printf '\nFormatted report: %s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+          fi
+
+      - name: Upload test output and coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: |
+            ${{ runner.temp }}/test-results.json
+            ${{ runner.temp }}/test-stderr.log
+            ${{ runner.temp }}/coverage.out
+          retention-days: 14

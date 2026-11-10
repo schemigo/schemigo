@@ -12,7 +12,7 @@ import (
 	"github.com/schemigo/schemigo"
 )
 
-// Diff plans extension and enum changes without executing DDL. Other entity
+// Diff plans table, column, primary key, extension and enum changes without executing DDL. Other entity
 // changes return errors.ErrUnsupported until their diff phases are implemented.
 // Both schemas must name the same namespace. Enum rebuilds require conn for
 // dependency discovery; creates and additive changes can be planned without it.
@@ -29,6 +29,8 @@ func (*Driver) Diff(ctx context.Context, conn *sql.Conn, current, desired schemi
 	if err != nil {
 		return schemigo.Plan{}, fmt.Errorf("desired schema: %w", err)
 	}
+	canonicalTableProperties(&current)
+	canonicalTableProperties(&desired)
 	if current.Name == "" || current.Name != desired.Name {
 		return schemigo.Plan{}, fmt.Errorf("diff requires the same nonempty schema name: %q, %q", current.Name, desired.Name)
 	}
@@ -56,6 +58,19 @@ func (*Driver) Diff(ctx context.Context, conn *sql.Conn, current, desired schemi
 		}
 	}
 	// Slice ordering of independently named objects is not a schema change.
+	for _, oldEnum := range current.Enums {
+		present := slices.ContainsFunc(desired.Enums, func(e schemigo.Enum) bool { return e.Name == oldEnum.Name })
+		if present {
+			continue
+		}
+		for _, table := range desired.Tables {
+			for _, column := range table.Columns {
+				if strings.TrimSuffix(columnTypeKey(current, column.Type), "[]") == Qualified(current.Name, oldEnum.Name) {
+					return schemigo.Plan{}, fmt.Errorf("desired column %s.%s still references removed enum %q", Qualified(desired.Name, table.Name), QuoteIdent(column.Name), oldEnum.Name)
+				}
+			}
+		}
+	}
 	for _, s := range []*schemigo.Schema{&current, &desired} {
 		slices.SortFunc(s.Tables, func(a, b schemigo.Table) int { return strings.Compare(a.Name, b.Name) })
 		slices.SortFunc(s.Views, func(a, b schemigo.View) int { return strings.Compare(a.Name, b.Name) })
@@ -63,9 +78,6 @@ func (*Driver) Diff(ctx context.Context, conn *sql.Conn, current, desired schemi
 			return strings.Compare(a.Name+"\x00"+a.Parameters, b.Name+"\x00"+b.Parameters)
 		})
 		slices.SortFunc(s.Triggers, func(a, b schemigo.Trigger) int { return strings.Compare(a.Table+"\x00"+a.Name, b.Table+"\x00"+b.Name) })
-	}
-	if !reflect.DeepEqual(current.Views, desired.Views) || !reflect.DeepEqual(current.Functions, desired.Functions) || !reflect.DeepEqual(current.Triggers, desired.Triggers) {
-		return schemigo.Plan{}, fmt.Errorf("functions, triggers or views changed: %w", errors.ErrUnsupported)
 	}
 	enums, columns, err := diffEnums(ctx, conn, current, desired)
 	if err != nil {
@@ -82,19 +94,68 @@ func (*Driver) Diff(ctx context.Context, conn *sql.Conn, current, desired schemi
 			}
 		}
 	}
-	if !reflect.DeepEqual(current.Tables, desired.Tables) {
-		return schemigo.Plan{}, fmt.Errorf("tables changed outside enum defaults: %w", errors.ErrUnsupported)
+	tables, err := diffTables(&current, desired)
+	if err != nil {
+		return schemigo.Plan{}, err
+	}
+	for i := range tables {
+		tables[i] = tableSchemaScope(desired.Name, tables[i])
+	}
+	slices.SortFunc(current.Triggers, func(a, b schemigo.Trigger) int { return strings.Compare(a.Table+"\x00"+a.Name, b.Table+"\x00"+b.Name) })
+	if !reflect.DeepEqual(current.Views, desired.Views) || !reflect.DeepEqual(current.Functions, desired.Functions) || !reflect.DeepEqual(current.Triggers, desired.Triggers) {
+		return schemigo.Plan{}, fmt.Errorf("functions, triggers or views changed: %w", errors.ErrUnsupported)
+	}
+	// Drops follow table operations; creates/additions precede consumers of enum types.
+	var enumDrops []schemigo.Statement
+	activeEnums := []schemigo.Statement{}
+	for _, statement := range enums {
+		if strings.HasPrefix(statement.SQL, "DROP TYPE IF EXISTS ") {
+			enumDrops = append(enumDrops, statement)
+		} else {
+			activeEnums = append(activeEnums, statement)
+		}
 	}
 	var plan schemigo.Plan
+	enumsEmitted := false
 	for _, kind := range desired.Order {
 		switch kind {
 		case schemigo.EntityExtensions:
 			plan.Statements = append(plan.Statements, diffExtensions(current, desired)...)
 		case schemigo.EntityEnums:
-			plan.Statements = append(plan.Statements, enums...)
+			if !enumsEmitted {
+				plan.Statements = append(plan.Statements, activeEnums...)
+				enumsEmitted = true
+			}
+		case schemigo.EntityTables:
+			if !enumsEmitted && len(tables) > 0 && tableUsesChangedEnum(current, desired) {
+				plan.Statements = append(plan.Statements, activeEnums...)
+				enumsEmitted = true
+			}
+			plan.Statements = append(plan.Statements, tables...)
 		}
 	}
+	plan.Statements = append(plan.Statements, enumDrops...)
 	return plan, nil
+}
+
+func tableUsesChangedEnum(current, desired schemigo.Schema) bool {
+	old := map[string][]string{}
+	for _, e := range current.Enums {
+		old[e.Name] = e.Values
+	}
+	for _, e := range desired.Enums {
+		if slices.Equal(old[e.Name], e.Values) {
+			continue
+		}
+		for _, table := range desired.Tables {
+			for _, column := range table.Columns {
+				if strings.TrimSuffix(columnTypeKey(desired, column.Type), "[]") == Qualified(desired.Name, e.Name) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func postgresName(name string) error {
