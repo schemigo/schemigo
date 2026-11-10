@@ -1,5 +1,5 @@
 {
-  "name": "Require passing tests before merge",
+  "name": "Require passing tests and builds before merge",
   "target": "branch",
   "enforcement": "active",
   "bypass_actors": [],
@@ -24,7 +24,11 @@
       "type": "required_status_checks",
       "parameters": {
         "required_status_checks": [
-          {"context": "All tests (PostgreSQL 18)"}
+          {"context": "All tests (PostgreSQL 18)"},
+          {"context": "Build (linux/amd64)"},
+          {"context": "Build (windows/amd64)"},
+          {"context": "Build (darwin/amd64)"},
+          {"context": "Build (darwin/arm64)"}
         ],
         "strict_required_status_checks_policy": true,
         "do_not_enforce_on_create": false

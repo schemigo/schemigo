@@ -9,6 +9,51 @@ permissions:
   contents: read
 
 jobs:
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '0'
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        id: go
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Cache Go modules and compilation
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-build-${{ matrix.goos }}-${{ matrix.goarch }}-go-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ matrix.goos }}-${{ matrix.goarch }}-go-${{ steps.go.outputs.go-version }}-
+
+      - name: Compile all packages and link CLI
+        run: go build -mod=readonly -o "$RUNNER_TEMP/build/" ./...
+
   tests:
     name: All tests (PostgreSQL 18)
     runs-on: ubuntu-latest
