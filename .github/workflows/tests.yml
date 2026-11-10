@@ -1,0 +1,92 @@
+name: Tests
+
+on:
+  pull_request:
+    # synchronize fires when commits are pushed to an open PR's branch.
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: All tests (PostgreSQL 18)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOTOOLCHAIN: local
+      SCHEMIGO_TESTCONTAINERS: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run unit and integration tests
+        id: tests
+        run: |
+          go test -mod=readonly -race -shuffle=on -tags=integration -count=1 -timeout=10m \
+            -coverprofile="$RUNNER_TEMP/coverage.out" -json ./... \
+            2> "$RUNNER_TEMP/test-stderr.log" | tee "$RUNNER_TEMP/test-results.json" \
+            | jq --unbuffered -r '
+                if .Action == "start" then "PACKAGE START: " + .Package
+                elif .Output then .Output | rtrimstr("\n")
+                else empty end
+              '
+
+      - name: Report test failures
+        if: always()
+        env:
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+        run: |
+          {
+            printf '## Tests: %s\n\n' "$TEST_OUTCOME"
+            if [[ -f "$RUNNER_TEMP/test-results.json" ]]; then
+              jq -rs '
+                def count_tests(action): [.[] | select(.Test != null and .Action == action)] | length;
+                "| Package | Status | Passed | Failed | Skipped |",
+                "| --- | --- | ---: | ---: | ---: |",
+                (group_by(.Package // .ImportPath)[]
+                  | "| <code>" + ((.[0].Package // .[0].ImportPath // "Go build") | @html)
+                    + "</code> | "
+                    + ([.[] | select(.Test == null and (.Action == "pass" or .Action == "fail" or .Action == "skip" or .Action == "build-fail"))] | last | .Action // "incomplete")
+                    + " | \(count_tests("pass")) | \(count_tests("fail")) | \(count_tests("skip")) |"),
+                "| **Total** | | \(count_tests("pass")) | \(count_tests("fail")) | \(count_tests("skip")) |",
+                "\nCounts include subtests. Package/build failures are shown separately below.\n"
+              ' "$RUNNER_TEMP/test-results.json"
+              jq -rs '
+                group_by([.Package // .ImportPath, .Test])
+                | .[]
+                | select(any(.Action == "fail" or .Action == "build-fail"))
+                | "<h3>" + ((.[0].Package // .[0].ImportPath // "Go build") | @html)
+                  + (if .[0].Test then " / " + (.[0].Test | @html) else " (package/build)" end)
+                  + "</h3>\n<pre>" + (map(.Output // "") | join("") | @html) + "</pre>\n"
+              ' "$RUNNER_TEMP/test-results.json"
+            else
+              printf 'Tests did not start. See the failed setup step in the job log.\n\n'
+            fi
+            if [[ -s "$RUNNER_TEMP/test-stderr.log" ]]; then
+              printf '<details><summary>Go command diagnostics</summary>\n\n'
+              jq -Rs '"<pre>" + @html + "</pre>"' "$RUNNER_TEMP/test-stderr.log"
+              printf '\n</details>\n\n'
+            fi
+            printf '\nFull test output and coverage are saved in the test-results artifact.\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test output and coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: |
+            ${{ runner.temp }}/test-results.json
+            ${{ runner.temp }}/test-stderr.log
+            ${{ runner.temp }}/coverage.out
+          retention-days: 14

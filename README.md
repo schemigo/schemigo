@@ -43,6 +43,8 @@ Unit-тесты модели, валидации, SQL-плана и PostgreSQL i
 
 Интеграционные тесты используют pgx и testcontainers из `go.mod`. Для запуска нужны Docker и команда `SCHEMIGO_TESTCONTAINERS=1 go test -mod=readonly -tags=integration ./...`. Helper создаёт PostgreSQL 18 с изолированными fixtures и удаляет контейнер после теста. Без этой переменной тесты с тегом `integration` собираются и пропускают запуск контейнера.
 
+GitHub Actions запускает все unit- и интеграционные тесты при открытии/повторном открытии PR и каждом пуше в его ветку (`pull_request: synchronize`). Workflow [Tests](.github/workflows/tests.yml) использует Go из `go.mod`, PostgreSQL 18 и `-race`, без кеширования результатов тестов. Лог отмечает старт каждого пакета; итоговая таблица в логе и Summary показывает статус пакета, количество прошедших, упавших и пропущенных тестов, включая subtests, и общий итог. Ниже выводятся имя каждого упавшего теста и его диагностический контекст, включая ошибки сборки. Результат доступен в PR → Checks → Tests. Полные JSON-логи, stderr и покрытие сохраняются в артефакте `test-results` на 14 дней.
+
 Inspector исключает `schema_migrations`, объекты расширений и constraint triggers. Поддерживаются триггеры на таблицах и обычных views, включая `INSTEAD OF`; materialized views не могут быть целью триггера. Для свойств вне текущей модели, например identity/generated columns, partitioning, UNIQUE constraints, INCLUDE indexes, cross-schema FK и расширенных опций функций, возвращается ошибка. PostgreSQL Validate, Lock и методы истории пока возвращают `errors.ErrUnsupported`.
 
 Требования: [SPEC.md](SPEC.md). Стандарт кода: [CODING_STANDARDS.md](CODING_STANDARDS.md). Этапы: [план реализации](docs/superpowers/plans/2026-11-09-schemigo.md).
