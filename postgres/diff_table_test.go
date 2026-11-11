@@ -1,7 +1,6 @@
 package postgres_test
 
 import (
-	"errors"
 	"strings"
 	"testing"
 
@@ -95,9 +94,9 @@ func TestDiffColumnAndConstraintScope(t *testing.T) {
 		t.Fatal(p.SQL())
 	}
 	desired.Checks = []schemigo.Check{{Name: "x", Expression: "id > 0"}}
-	p, err := postgres.New().Diff(t.Context(), nil, tableSchema(simpleTable("t")), tableSchema(desired))
-	if !errors.Is(err, errors.ErrUnsupported) || len(p.Statements) > 0 {
-		t.Fatalf("plan=%+v, err=%v", p, err)
+	p = tablePlan(t, tableSchema(simpleTable("t")), tableSchema(desired))
+	if !strings.Contains(p.SQL(), `ADD CONSTRAINT "x" CHECK (id > 0)`) {
+		t.Fatal(p.SQL())
 	}
 }
 func TestDiffColumnAliasesAndHints(t *testing.T) {
@@ -118,13 +117,14 @@ func TestDiffTableDropOrder(t *testing.T) {
 	child := simpleTable("z_child")
 	child.ForeignKeys = []schemigo.ForeignKey{{Name: "fk", Columns: []string{"id"}, ReferencedTable: "parent", ReferencedColumns: []string{"id"}}}
 	p := tablePlan(t, tableSchema(parent, child), tableSchema())
-	if len(p.Statements) != 2 || !strings.Contains(p.Statements[0].SQL, `"z_child"`) || !strings.Contains(p.Statements[1].SQL, `"parent"`) {
+	if len(p.Statements) != 3 || !strings.Contains(p.Statements[0].SQL, `DROP CONSTRAINT IF EXISTS "fk"`) || !strings.Contains(p.Statements[1].SQL, `DROP TABLE IF EXISTS`) {
 		t.Fatal(p.SQL())
 	}
 	parent.ForeignKeys = []schemigo.ForeignKey{{Name: "back", Columns: []string{"id"}, ReferencedTable: "z_child", ReferencedColumns: []string{"id"}}}
-	p, err := postgres.New().Diff(t.Context(), nil, tableSchema(parent, child), tableSchema())
-	if !errors.Is(err, errors.ErrUnsupported) || len(p.Statements) != 0 {
-		t.Fatalf("cyclic FK drop plan=%+v, err=%v", p, err)
+	child.PrimaryKey = []string{"id"}
+	p = tablePlan(t, tableSchema(parent, child), tableSchema())
+	if len(p.Statements) != 4 || !strings.Contains(p.Statements[0].SQL, "DROP CONSTRAINT") || !strings.Contains(p.Statements[1].SQL, "DROP CONSTRAINT") {
+		t.Fatalf("cyclic FK drop plan=%+v", p)
 	}
 }
 

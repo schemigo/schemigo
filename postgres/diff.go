@@ -12,8 +12,8 @@ import (
 	"github.com/schemigo/schemigo"
 )
 
-// Diff plans table, column, primary key, extension and enum changes without executing DDL. Other entity
-// changes return errors.ErrUnsupported until their diff phases are implemented.
+// Diff plans table, column, key, index, CHECK, extension and enum changes without executing DDL.
+// Function, trigger and view changes return errors.ErrUnsupported until their phases are implemented.
 // Both schemas must name the same namespace. Enum rebuilds require conn for
 // dependency discovery; creates and additive changes can be planned without it.
 func (*Driver) Diff(ctx context.Context, conn *sql.Conn, current, desired schemigo.Schema) (schemigo.Plan, error) {
