@@ -121,6 +121,7 @@ func TestInspectPostgresRejectsUnsupported(t *testing.T) {
 		{name: "identity", ddl: `CREATE TABLE x.t (id bigint GENERATED ALWAYS AS IDENTITY)`, want: "identity"},
 		{name: "include", ddl: `CREATE TABLE x.t (id int, value text); CREATE INDEX inc ON x.t (id) INCLUDE (value)`, want: "INCLUDE"},
 		{name: "cross schema FK", ddl: `CREATE TABLE x.t (id int REFERENCES public.target(id))`, want: "constraint"},
+		{name: "unenforced check", ddl: `CREATE TABLE x.t (id int CONSTRAINT checked CHECK(id > 0) NOT ENFORCED)`, want: "constraint"},
 		{name: "function options", ddl: `CREATE FUNCTION x.f() RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT 1'`, want: "function options"},
 	}
 	execFixture(t, db, `CREATE TABLE public.target (id int PRIMARY KEY)`)

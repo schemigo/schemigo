@@ -51,7 +51,12 @@ func matchRenames[T any](before, after []T, name func(T) string, equal func(T, T
 func canonicalTableProperties(s *schemigo.Schema) {
 	for i := range s.Tables {
 		t := &s.Tables[i]
+		slices.SortFunc(t.Indexes, func(a, b schemigo.Index) int { return strings.Compare(a.Name, b.Name) })
+		slices.SortFunc(t.ForeignKeys, func(a, b schemigo.ForeignKey) int { return strings.Compare(a.Name, b.Name) })
+		slices.SortFunc(t.Checks, func(a, b schemigo.Check) int { return strings.Compare(a.Name, b.Name) })
 		for j := range t.ForeignKeys {
+			t.ForeignKeys[j].OnDelete = strings.ToUpper(strings.Join(strings.Fields(t.ForeignKeys[j].OnDelete), " "))
+			t.ForeignKeys[j].OnUpdate = strings.ToUpper(strings.Join(strings.Fields(t.ForeignKeys[j].OnUpdate), " "))
 			if t.ForeignKeys[j].OnDelete == "" {
 				t.ForeignKeys[j].OnDelete = "NO ACTION"
 			}
@@ -87,6 +92,15 @@ func tableShape(s schemigo.Schema, t schemigo.Table) schemigo.Table {
 	t.Name = ""
 	t.Columns = slices.Clone(t.Columns)
 	t.ForeignKeys = slices.Clone(t.ForeignKeys)
+	t.Indexes = slices.Clone(t.Indexes)
+	t.Checks = slices.Clone(t.Checks)
+	for i := range t.Indexes {
+		t.Indexes[i].Expression = expressionKey(t.Indexes[i].Expression)
+		t.Indexes[i].Where = expressionKey(t.Indexes[i].Where)
+	}
+	for i := range t.Checks {
+		t.Checks[i].Expression = expressionKey(t.Checks[i].Expression)
+	}
 	for i := range t.ForeignKeys {
 		if t.ForeignKeys[i].ReferencedTable == self {
 			t.ForeignKeys[i].ReferencedTable = ""
@@ -102,6 +116,9 @@ func tableShape(s schemigo.Schema, t schemigo.Table) schemigo.Table {
 
 func diffTables(current *schemigo.Schema, desired schemigo.Schema) ([]schemigo.Statement, error) {
 	for _, s := range []schemigo.Schema{*current, desired} {
+		if err := validateTableObjects(s); err != nil {
+			return nil, err
+		}
 		for _, t := range s.Tables {
 			if err := postgresName(t.Name); err != nil {
 				return nil, err
@@ -223,6 +240,8 @@ func diffTables(current *schemigo.Schema, desired schemigo.Schema) ([]schemigo.S
 			}
 		}
 	}
+	drops, creates := diffTableObjects(*current, desired)
+	result = append(result, drops...)
 	oldTables := map[string]schemigo.Table{}
 	wanted := map[string]bool{}
 	for _, t := range current.Tables {
@@ -232,14 +251,8 @@ func diffTables(current *schemigo.Schema, desired schemigo.Schema) ([]schemigo.S
 		wanted[next.Name] = true
 		old, exists := oldTables[next.Name]
 		if !exists {
-			if len(next.Indexes)+len(next.ForeignKeys)+len(next.Checks) > 0 {
-				return nil, fmt.Errorf("new table %q indexes/FK/CHECK require task 6: %w", next.Name, errors.ErrUnsupported)
-			}
 			result = append(result, createTable(desired, next))
 			continue
-		}
-		if !reflect.DeepEqual(old.Indexes, next.Indexes) || !reflect.DeepEqual(old.ForeignKeys, next.ForeignKeys) || !reflect.DeepEqual(old.Checks, next.Checks) {
-			return nil, fmt.Errorf("table %q indexes/FK/CHECK changed: %w", next.Name, errors.ErrUnsupported)
 		}
 		statements, err := diffColumns(*current, desired, old, next)
 		if err != nil {
@@ -247,38 +260,12 @@ func diffTables(current *schemigo.Schema, desired schemigo.Schema) ([]schemigo.S
 		}
 		result = append(result, statements...)
 	}
-	pending := map[string]bool{}
 	for _, old := range current.Tables {
 		if !wanted[old.Name] {
-			pending[old.Name] = true
-		}
-	}
-	for len(pending) > 0 {
-		progress := false
-		for _, old := range current.Tables {
-			if !pending[old.Name] {
-				continue
-			}
-			blocked := false
-			for _, child := range current.Tables {
-				if pending[child.Name] && child.Name != old.Name {
-					for _, fk := range child.ForeignKeys {
-						blocked = blocked || fk.ReferencedTable == old.Name
-					}
-				}
-			}
-			if blocked {
-				continue
-			}
 			result = append(result, tableDDL("DROP TABLE IF EXISTS "+Qualified(current.Name, old.Name), true))
-			delete(pending, old.Name)
-			progress = true
-		}
-		if !progress {
-			return nil, fmt.Errorf("cyclic foreign keys require constraint diff: %w", errors.ErrUnsupported)
 		}
 	}
-	return result, nil
+	return append(result, creates...), nil
 }
 
 func renameColumn(s schemigo.Schema, table string, old schemigo.Column, next string) schemigo.Statement {
@@ -330,7 +317,20 @@ func createTable(s schemigo.Schema, t schemigo.Table) schemigo.Statement {
 		pk = "ARRAY[" + enumLiterals(t.PrimaryKey) + "]::text[]"
 	}
 	checks = append(checks, "(SELECT array_agg(a.attname::text ORDER BY k.ord) FROM pg_catalog.pg_constraint con CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY k(num,ord) JOIN pg_catalog.pg_attribute a ON a.attrelid=con.conrelid AND a.attnum=k.num WHERE con.conrelid="+relation+" AND con.contype='p') IS NOT DISTINCT FROM "+pk)
-	checks = append(checks, "NOT EXISTS (SELECT FROM pg_catalog.pg_index WHERE indrelid="+relation+" AND NOT indisprimary)", "NOT EXISTS (SELECT FROM pg_catalog.pg_constraint WHERE conrelid="+relation+" AND contype IN ('f','c','u','x'))", "NOT EXISTS (SELECT FROM pg_catalog.pg_trigger WHERE tgrelid="+relation+" AND NOT tgisinternal)")
+	indexNames, fkNames, checkNames := "''", "''", "''"
+	for _, idx := range t.Indexes {
+		indexNames += "," + QuoteLiteral(idx.Name)
+	}
+	for _, fk := range t.ForeignKeys {
+		fkNames += "," + QuoteLiteral(fk.Name)
+	}
+	for _, check := range t.Checks {
+		checkNames += "," + QuoteLiteral(check.Name)
+	}
+	checks = append(checks,
+		"NOT EXISTS (SELECT FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class ic ON ic.oid=i.indexrelid WHERE i.indrelid="+relation+" AND NOT i.indisprimary AND ic.relname NOT IN ("+indexNames+"))",
+		"NOT EXISTS (SELECT FROM pg_catalog.pg_constraint WHERE conrelid="+relation+" AND (contype IN ('u','x') OR (contype='f' AND conname NOT IN ("+fkNames+")) OR (contype='c' AND conname NOT IN ("+checkNames+"))))",
+		"NOT EXISTS (SELECT FROM pg_catalog.pg_trigger WHERE tgrelid="+relation+" AND NOT tgisinternal)")
 	body := "IF " + relation + " IS NULL THEN CREATE TABLE IF NOT EXISTS " + qualified + " (" + strings.Join(definitions, ", ") + "); ELSE IF NOT (" + strings.Join(checks, " AND ") + ") THEN RAISE EXCEPTION 'existing table definition differs; replan'; END IF;\n"
 	for _, c := range t.Columns {
 		body += setDefaultSQL(qualified, c) + ";\n"
