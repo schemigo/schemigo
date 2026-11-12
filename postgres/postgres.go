@@ -12,8 +12,9 @@ import (
 	"github.com/schemigo/schemigo"
 )
 
-// Driver inspects PostgreSQL and plans table, column, key, index, CHECK, enum and extension changes.
-// Other migration operations return errors.ErrUnsupported. Its zero value is ready for use.
+// Driver inspects PostgreSQL and plans changes to tables, constraints, enums,
+// extensions, functions, triggers and views. Execution and history methods
+// return errors.ErrUnsupported. Its zero value is ready for use.
 type Driver struct{}
 
 var _ schemigo.Driver = (*Driver)(nil)

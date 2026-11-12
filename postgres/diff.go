@@ -3,17 +3,16 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"strings"
 
 	"github.com/schemigo/schemigo"
 )
 
-// Diff plans table, column, key, index, CHECK, extension and enum changes without executing DDL.
-// Function, trigger and view changes return errors.ErrUnsupported until their phases are implemented.
+// Diff plans PostgreSQL schema changes without executing DDL.
+// Replacing or removing existing views and rebuilding functions requires conn
+// for dependency discovery. View output is described without executing SELECT.
 // Both schemas must name the same namespace. Enum rebuilds require conn for
 // dependency discovery; creates and additive changes can be planned without it.
 func (*Driver) Diff(ctx context.Context, conn *sql.Conn, current, desired schemigo.Schema) (schemigo.Plan, error) {
@@ -31,6 +30,11 @@ func (*Driver) Diff(ctx context.Context, conn *sql.Conn, current, desired schemi
 	}
 	canonicalTableProperties(&current)
 	canonicalTableProperties(&desired)
+	for _, s := range []*schemigo.Schema{&current, &desired} {
+		if err := normalizeTriggers(s); err != nil {
+			return schemigo.Plan{}, err
+		}
+	}
 	if current.Name == "" || current.Name != desired.Name {
 		return schemigo.Plan{}, fmt.Errorf("diff requires the same nonempty schema name: %q, %q", current.Name, desired.Name)
 	}
@@ -94,6 +98,15 @@ func (*Driver) Diff(ctx context.Context, conn *sql.Conn, current, desired schemi
 			}
 		}
 	}
+	functions, err := functionChanges(current, desired)
+	if err != nil {
+		return schemigo.Plan{}, err
+	}
+	views, err := diffViews(ctx, conn, current, desired, functions)
+	if err != nil {
+		return schemigo.Plan{}, err
+	}
+	oldTriggers := slices.Clone(current.Triggers)
 	tables, err := diffTables(&current, desired)
 	if err != nil {
 		return schemigo.Plan{}, err
@@ -101,9 +114,36 @@ func (*Driver) Diff(ctx context.Context, conn *sql.Conn, current, desired schemi
 	for i := range tables {
 		tables[i] = tableSchemaScope(desired.Name, tables[i])
 	}
+	renamedTriggerKeys := map[string]string{}
+	for i, old := range oldTriggers {
+		renamedTriggerKeys[triggerKey(old)] = triggerKey(current.Triggers[i])
+	}
 	slices.SortFunc(current.Triggers, func(a, b schemigo.Trigger) int { return strings.Compare(a.Table+"\x00"+a.Name, b.Table+"\x00"+b.Name) })
-	if !reflect.DeepEqual(current.Views, desired.Views) || !reflect.DeepEqual(current.Functions, desired.Functions) || !reflect.DeepEqual(current.Triggers, desired.Triggers) {
-		return schemigo.Plan{}, fmt.Errorf("functions, triggers or views changed: %w", errors.ErrUnsupported)
+	var triggerDrops, triggerCreates, functionDrops, functionCreates []schemigo.Statement
+	for _, f := range functions {
+		if functionNeedsDrop(f) {
+			functionDrops = append(functionDrops, dropFunction(current.Name, f))
+		}
+		if f.next != nil {
+			functionCreates = append(functionCreates, createFunction(desired.Name, *f.next))
+		}
+	}
+	for _, old := range oldTriggers {
+		keep := slices.ContainsFunc(desired.Triggers, func(t schemigo.Trigger) bool { return triggerKey(t) == renamedTriggerKeys[triggerKey(old)] })
+		functionDropped := slices.ContainsFunc(functions, func(f functionChange) bool {
+			return functionNeedsDrop(f) && f.old.Name == old.Function && f.identity == ""
+		})
+		if !keep || views.rebuilt[old.Table] || views.triggerDrops[triggerKey(old)] || functionDropped {
+			triggerDrops = append(triggerDrops, dropTrigger(current.Name, old))
+			views.triggerDrops[triggerKey(old)] = true
+			views.triggerDrops[renamedTriggerKeys[triggerKey(old)]] = true
+		}
+	}
+	for _, next := range desired.Triggers {
+		unchanged := slices.ContainsFunc(current.Triggers, func(t schemigo.Trigger) bool { return sameTrigger(t, next) })
+		if !unchanged || views.rebuilt[next.Table] || views.triggerDrops[triggerKey(next)] {
+			triggerCreates = append(triggerCreates, createTrigger(desired.Name, next))
+		}
 	}
 	// Drops follow table operations; creates/additions precede consumers of enum types.
 	var enumDrops []schemigo.Statement
@@ -116,7 +156,44 @@ func (*Driver) Diff(ctx context.Context, conn *sql.Conn, current, desired schemi
 		}
 	}
 	var plan schemigo.Plan
+	plan.Statements = append(plan.Statements, triggerDrops...)
+	plan.Statements = append(plan.Statements, views.drops...)
 	enumsEmitted := false
+	emitted := map[schemigo.EntityKind]bool{}
+	var emit func(schemigo.EntityKind)
+	emit = func(kind schemigo.EntityKind) {
+		if emitted[kind] {
+			return
+		}
+		emitted[kind] = true
+		switch kind {
+		case schemigo.EntityTables:
+			if !enumsEmitted && len(tables) > 0 && tableUsesChangedEnum(current, desired) {
+				plan.Statements = append(plan.Statements, activeEnums...)
+				enumsEmitted = true
+			}
+			plan.Statements = append(plan.Statements, tables...)
+		case schemigo.EntityFunctions:
+			if len(functionCreates)+len(functionDrops) > 0 {
+				emit(schemigo.EntityTables)
+			}
+			plan.Statements = append(plan.Statements, functionDrops...)
+			plan.Statements = append(plan.Statements, functionCreates...)
+		case schemigo.EntityViews:
+			if len(views.creates) > 0 {
+				emit(schemigo.EntityTables)
+				emit(schemigo.EntityFunctions)
+			}
+			plan.Statements = append(plan.Statements, views.creates...)
+		case schemigo.EntityTriggers:
+			if len(triggerCreates) > 0 {
+				emit(schemigo.EntityTables)
+				emit(schemigo.EntityFunctions)
+				emit(schemigo.EntityViews)
+			}
+			plan.Statements = append(plan.Statements, triggerCreates...)
+		}
+	}
 	for _, kind := range desired.Order {
 		switch kind {
 		case schemigo.EntityExtensions:
@@ -126,12 +203,8 @@ func (*Driver) Diff(ctx context.Context, conn *sql.Conn, current, desired schemi
 				plan.Statements = append(plan.Statements, activeEnums...)
 				enumsEmitted = true
 			}
-		case schemigo.EntityTables:
-			if !enumsEmitted && len(tables) > 0 && tableUsesChangedEnum(current, desired) {
-				plan.Statements = append(plan.Statements, activeEnums...)
-				enumsEmitted = true
-			}
-			plan.Statements = append(plan.Statements, tables...)
+		case schemigo.EntityTables, schemigo.EntityFunctions, schemigo.EntityViews, schemigo.EntityTriggers:
+			emit(kind)
 		}
 	}
 	plan.Statements = append(plan.Statements, enumDrops...)

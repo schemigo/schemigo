@@ -86,7 +86,7 @@ func TestDiffExtension(t *testing.T) {
 func TestDiffRejectsUnsupported(t *testing.T) {
 	old := enumSchema("a")
 	desired := enumSchema("a", "b")
-	desired.Views = []schemigo.View{{Name: "v", Definition: "SELECT 1"}}
+	desired.Tables = []schemigo.Table{{Name: "unsupported", Engine: "MergeTree", Columns: []schemigo.Column{{Name: "id", Type: "bigint"}}}}
 	p, err := postgres.New().Diff(t.Context(), nil, old, desired)
 	if !errors.Is(err, errors.ErrUnsupported) || len(p.Statements) != 0 {
 		t.Fatalf("plan=%+v, err=%v", p, err)
