@@ -187,7 +187,9 @@ func TestTriggerMigration(t *testing.T) {
 	executePlan(t, db, p)
 	executePlan(t, db, p)
 	assertConverged(t, db, desired)
-	desired.Views[0].Definition = "SELECT id AS changed FROM public.users"
+	// Inspect omits the visible schema prefix. Keep that spelling to test trigger
+	// restoration independently of unsupported semantic SQL canonicalization.
+	desired.Views[0].Definition = "SELECT id AS changed FROM users"
 	executePlan(t, db, diffFromDB(t, db, desired))
 	assertConverged(t, db, desired)
 	desired.Triggers = nil
