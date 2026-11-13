@@ -48,12 +48,23 @@ func Export(ctx context.Context, db *sql.DB, driver Driver, schemaName, dir stri
 	if schema.Name != schemaName {
 		return fmt.Errorf("export schema: inspected namespace %q differs from requested %q", schema.Name, schemaName)
 	}
+	return publishSchema(ctx, schema, location.dir, true)
+}
+
+// publishSchema writes an inspected schema without acquiring another connection.
+func publishSchema(ctx context.Context, schema Schema, dir string, unpinVersions bool) error {
+	location, err := schemaLocation(ctx, dir)
+	if err != nil {
+		return fmt.Errorf("export schema: %w", err)
+	}
 	schema, err = Normalize(schema)
 	if err != nil {
 		return fmt.Errorf("export schema: %w", err)
 	}
-	for i := range schema.Extensions {
-		schema.Extensions[i].Version = ""
+	if unpinVersions {
+		for i := range schema.Extensions {
+			schema.Extensions[i].Version = ""
+		}
 	}
 	files, err := schemaFiles(schema, location.importPath)
 	if err != nil {
