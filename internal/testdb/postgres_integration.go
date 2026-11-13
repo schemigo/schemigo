@@ -7,7 +7,10 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -107,4 +110,16 @@ func Postgres(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	return db
+}
+
+// PostgresURL returns a disposable database and its connection URL for CLI tests.
+func PostgresURL(t *testing.T) (*sql.DB, string) {
+	t.Helper()
+	db := Postgres(t)
+	var database string
+	if err := db.QueryRowContext(t.Context(), "SELECT current_database()").Scan(&database); err != nil {
+		t.Fatal(err)
+	}
+	u := url.URL{Scheme: "postgres", User: url.UserPassword(server.config.User, server.config.Password), Host: net.JoinHostPort(server.config.Host, strconv.Itoa(int(server.config.Port))), Path: "/" + database, RawQuery: "sslmode=disable"}
+	return db, u.String()
 }

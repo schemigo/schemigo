@@ -3,10 +3,31 @@ package schemigo_test
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 
 	"github.com/schemigo/schemigo"
 )
+
+type changedPlanDriver struct{ noopMigrationDriver }
+
+func (d changedPlanDriver) Diff(context.Context, *sql.Conn, schemigo.Schema, schemigo.Schema) (schemigo.Plan, error) {
+	*d.steps = append(*d.steps, "diff")
+	return schemigo.Plan{Statements: []schemigo.Statement{{SQL: "SELECT 1"}}}, nil
+}
+
+func TestApplyRejectsChangedPreview(t *testing.T) {
+	db := sql.OpenDB(exportConnector{})
+	t.Cleanup(func() { db.Close() })
+	var steps []string
+	err := schemigo.Apply(t.Context(), db, changedPlanDriver{noopMigrationDriver{steps: &steps}}, "public", schemigo.Schema{Name: "public"}, schemigo.ApplyOptions{NoBackup: true, ExpectedHash: "earlier-preview"})
+	if err == nil || !strings.Contains(err.Error(), "plan changed") {
+		t.Fatalf("changed plan was accepted: %v", err)
+	}
+	if strings.Join(steps, ",") != "lock,inspect,diff,unlock" {
+		t.Fatalf("changed plan reached validation or SQL: %v", steps)
+	}
+}
 
 type noopMigrationDriver struct {
 	schemigo.Driver
