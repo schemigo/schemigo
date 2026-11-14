@@ -2,9 +2,7 @@
 package postgres
 
 import (
-	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -13,8 +11,7 @@ import (
 )
 
 // Driver inspects PostgreSQL and plans changes to tables, constraints, enums,
-// extensions, functions, triggers and views. Execution and history methods
-// return errors.ErrUnsupported. Its zero value is ready for use.
+// extensions, functions, triggers and views. Its zero value is ready for use.
 type Driver struct{}
 
 var _ schemigo.Driver = (*Driver)(nil)
@@ -35,31 +32,3 @@ func Open(dsn string) (*sql.DB, error) {
 
 // Name returns the dialect identifier.
 func (*Driver) Name() string { return "postgres" }
-
-// Validate is not implemented yet.
-func (*Driver) Validate(context.Context, *sql.Conn, schemigo.Statement) error {
-	return errors.ErrUnsupported
-}
-
-// Lock is not implemented yet.
-func (*Driver) Lock(context.Context, *sql.Conn, string) (schemigo.UnlockFunc, error) {
-	return nil, errors.ErrUnsupported
-}
-
-// EnsureHistory is not implemented yet.
-func (*Driver) EnsureHistory(context.Context, *sql.Conn, string) error { return errors.ErrUnsupported }
-
-// HasMigration is not implemented yet.
-func (*Driver) HasMigration(context.Context, *sql.Conn, string, string) (bool, error) {
-	return false, errors.ErrUnsupported
-}
-
-// RecordMigration is not implemented yet.
-func (*Driver) RecordMigration(context.Context, *sql.Conn, string, schemigo.Migration) error {
-	return errors.ErrUnsupported
-}
-
-// ListMigrations is not implemented yet.
-func (*Driver) ListMigrations(context.Context, *sql.Conn, string) ([]schemigo.Migration, error) {
-	return nil, errors.ErrUnsupported
-}
