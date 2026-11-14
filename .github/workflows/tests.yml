@@ -65,13 +65,20 @@ jobs:
           - dialect: postgres
             database: PostgreSQL 18
             test_filter: -skip
+            test_pattern: '^TestClickHouse|MySQL'
+          - dialect: mysql
+            database: MySQL 8.4
+            test_filter: -run
+            test_pattern: 'MySQL'
           - dialect: clickhouse
             database: ClickHouse 25.8
             test_filter: -run
+            test_pattern: '^TestClickHouse'
     env:
       GOTOOLCHAIN: local
       SCHEMIGO_TESTCONTAINERS: '1'
       TEST_FILTER: ${{ matrix.test_filter }}
+      TEST_PATTERN: ${{ matrix.test_pattern }}
     defaults:
       run:
         shell: bash
@@ -89,7 +96,7 @@ jobs:
         id: tests
         run: |
           go test -mod=readonly -race -shuffle=on -tags=integration -count=1 -timeout=10m \
-            "$TEST_FILTER" '^TestClickHouse' \
+            "$TEST_FILTER" "$TEST_PATTERN" \
             -coverprofile="$RUNNER_TEMP/coverage.out" -json ./... \
             2> "$RUNNER_TEMP/test-stderr.log" | tee "$RUNNER_TEMP/test-results.json" \
             | jq --unbuffered -r '
