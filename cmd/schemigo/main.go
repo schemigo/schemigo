@@ -20,6 +20,9 @@ import (
 func main() { os.Exit(run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
 func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.Writer) int {
+	if len(args) > 0 && (args[0] == "table" || args[0] == "enum" || args[0] == "view") {
+		return runScaffold(ctx, args, out, diagnostics)
+	}
 	flags := flag.NewFlagSet("schemigo", flag.ContinueOnError)
 	flags.SetOutput(diagnostics)
 	dsn := flags.String("d", "", "PostgreSQL connection URL")

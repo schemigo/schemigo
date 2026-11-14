@@ -76,6 +76,17 @@ var Users = Table{
 То есть должно быть просто и нативно.
 
 
+### Генерация новых сущностей
+
+```bash
+schemigo table users 'id:int8,email:varchar(255),total:numeric(10,2)'
+schemigo enum order_status 'pending,processing,shipped,delivered,cancelled'
+schemigo view active_users ./active_users.sql
+schemigo view -materialized user_totals ./user_totals.sql
+```
+
+Команды работают без DSN, создают `./schema` при необходимости и добавляют новую сущность в соответствующий `all.go`. Для view SQL копируется в `schema/views/` и встраивается при загрузке Go-схемы. Флаги `-dir` и `-schema` указываются после команды, перед именем; `-schema` применяется при создании каталога.
+
 ### 3. Применение миграций
 
 ```bash
