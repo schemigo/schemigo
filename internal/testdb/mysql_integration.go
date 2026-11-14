@@ -49,8 +49,21 @@ func startMySQL() {
 	}
 	mysqlServer.port = port.Port()
 	mysqlServer.admin, mysqlServer.err = mysql.Open(mysqlURL("schemigo"))
-	if mysqlServer.err == nil {
-		mysqlServer.err = mysqlServer.admin.PingContext(ctx)
+	if mysqlServer.err != nil {
+		return
+	}
+	readyCtx, cancelReady := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelReady()
+	for {
+		mysqlServer.err = mysqlServer.admin.PingContext(readyCtx)
+		if mysqlServer.err == nil || readyCtx.Err() != nil {
+			return
+		}
+		select {
+		case <-readyCtx.Done():
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 }
 

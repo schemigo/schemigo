@@ -12,7 +12,7 @@ import (
 func sameTable(a, b schemigo.Table) bool {
 	return a.Name == b.Name && slices.EqualFunc(a.Columns, b.Columns, sameColumn) &&
 		slices.Equal(a.PrimaryKey, b.PrimaryKey) && reflect.DeepEqual(a.Indexes, b.Indexes) &&
-		reflect.DeepEqual(a.ForeignKeys, b.ForeignKeys) && reflect.DeepEqual(a.Checks, b.Checks) &&
+		reflect.DeepEqual(a.ForeignKeys, b.ForeignKeys) && slices.EqualFunc(a.Checks, b.Checks, sameCheck) &&
 		a.Engine == b.Engine && a.OrderBy == b.OrderBy && a.PartitionBy == b.PartitionBy
 }
 
@@ -144,7 +144,7 @@ func diffTable(schema string, old, next schemigo.Table) ([]schemigo.Statement, [
 	for _, check := range old.Checks {
 		oldChecks[check.Name] = check
 		nextCheck, found := findCheck(next.Checks, check.Name)
-		if !found || check.Expression != nextCheck.Expression {
+		if !found || !sameCheck(check, nextCheck) {
 			statements = append(statements, guardedDDL(schema, next.Name, "table_constraints", "constraint_name", check.Name, true, "ALTER TABLE "+ref+" DROP CHECK "+QuoteIdent(check.Name), true))
 		}
 	}
@@ -219,7 +219,7 @@ func diffTable(schema string, old, next schemigo.Table) ([]schemigo.Statement, [
 		}
 	}
 	for _, check := range next.Checks {
-		if previous, found := oldChecks[check.Name]; !found || previous.Expression != check.Expression {
+		if previous, found := oldChecks[check.Name]; !found || !sameCheck(previous, check) {
 			statements = append(statements, guardedDDL(schema, next.Name, "table_constraints", "constraint_name", check.Name, false, "ALTER TABLE "+ref+" ADD CONSTRAINT "+QuoteIdent(check.Name)+" CHECK ("+check.Expression+")", false))
 		}
 	}
@@ -233,6 +233,39 @@ func diffTable(schema string, old, next schemigo.Table) ([]schemigo.Statement, [
 
 func sameColumn(a, b schemigo.Column) bool {
 	return canonicalType(a.Type) == canonicalType(b.Type) && a.Name == b.Name && a.NotNull == b.NotNull && a.Default == b.Default && a.PrimaryKey == b.PrimaryKey
+}
+
+func sameCheck(a, b schemigo.Check) bool {
+	return a.Name == b.Name && canonicalCheck(a.Expression) == canonicalCheck(b.Expression)
+}
+
+func canonicalCheck(expression string) string {
+	expression = strings.TrimSpace(expression)
+	if strings.HasPrefix(expression, "(") && strings.HasSuffix(expression, ")") {
+		expression = strings.TrimSpace(expression[1 : len(expression)-1])
+	}
+	expression = strings.ReplaceAll(expression, "\\'", "'")
+	var result strings.Builder
+	inString, inIdentifier := false, false
+	for i := 0; i < len(expression); i++ {
+		if !inString && !inIdentifier && strings.HasPrefix(strings.ToLower(expression[i:]), "_utf8mb4'") {
+			i += len("_utf8mb4") - 1
+			continue
+		}
+		switch expression[i] {
+		case '`':
+			if !inString {
+				inIdentifier = !inIdentifier
+				continue
+			}
+		case '\'':
+			if !inIdentifier {
+				inString = !inString
+			}
+		}
+		result.WriteByte(expression[i])
+	}
+	return result.String()
 }
 
 func canonicalType(value string) string {

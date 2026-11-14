@@ -100,6 +100,7 @@ func TestDiffRejectsUnsupportedMySQLObjects(t *testing.T) {
 		{"materialized view", schemigo.Schema{Name: "app", Views: []schemigo.View{{Name: "v", Definition: "SELECT 1", Materialized: true}}}},
 		{"partial index", schemigo.Schema{Name: "app", Tables: []schemigo.Table{{Name: "users", Columns: []schemigo.Column{{Name: "id", Type: "bigint"}}, Indexes: []schemigo.Index{{Name: "idx", Columns: []string{"id"}, Where: "id > 0"}}}}}},
 		{"routine overload", schemigo.Schema{Name: "app", Functions: []schemigo.Function{{Name: "f", Parameters: "x int", Returns: "int", Body: "RETURN x"}, {Name: "f", Parameters: "x bigint", Returns: "bigint", Body: "RETURN x"}}}},
+		{"migration history table", schemigo.Schema{Name: "app", Tables: []schemigo.Table{{Name: "schema_migrations", Columns: []schemigo.Column{{Name: "id", Type: "bigint"}}}}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := mysql.New().Diff(t.Context(), nil, base, test.desired); err == nil {

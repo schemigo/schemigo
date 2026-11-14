@@ -10,19 +10,19 @@ import (
 )
 
 func inspectRoutines(ctx context.Context, conn *sql.Conn, schema string) ([]schemigo.Function, error) {
-	rows, err := conn.QueryContext(ctx, `SELECT routine_name, specific_name, routine_type, dtd_identifier, routine_definition
+	rows, err := conn.QueryContext(ctx, `SELECT routine_name, specific_name, routine_type, dtd_identifier, routine_definition, is_deterministic, sql_data_access
 FROM information_schema.routines WHERE routine_schema=? ORDER BY routine_name`, schema)
 	if err != nil {
 		return nil, fmt.Errorf("inspect routines: %w", err)
 	}
 	type routine struct {
-		name, specific, kind, returns, body string
+		name, specific, kind, returns, body, deterministic, dataAccess string
 	}
 	var routines []routine
 	for rows.Next() {
-		var name, specific, kind string
+		var name, specific, kind, deterministic, dataAccess string
 		var returns, body sql.NullString
-		if err := rows.Scan(&name, &specific, &kind, &returns, &body); err != nil {
+		if err := rows.Scan(&name, &specific, &kind, &returns, &body, &deterministic, &dataAccess); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -30,7 +30,7 @@ FROM information_schema.routines WHERE routine_schema=? ORDER BY routine_name`, 
 			rows.Close()
 			return nil, fmt.Errorf("routine %q: body is unavailable", name)
 		}
-		routines = append(routines, routine{name, specific, kind, returns.String, body.String})
+		routines = append(routines, routine{name, specific, kind, returns.String, body.String, deterministic, dataAccess})
 	}
 	if err := closeRows(rows); err != nil {
 		return nil, err
@@ -38,6 +38,12 @@ FROM information_schema.routines WHERE routine_schema=? ORDER BY routine_name`, 
 	var functions []schemigo.Function
 	for _, routine := range routines {
 		function := schemigo.Function{Name: routine.name, Body: routine.body}
+		if routine.dataAccess != "CONTAINS SQL" {
+			function.Body = routine.dataAccess + " " + function.Body
+		}
+		if routine.deterministic == "YES" {
+			function.Body = "DETERMINISTIC " + function.Body
+		}
 		switch routine.kind {
 		case "FUNCTION":
 			function.Returns = routine.returns

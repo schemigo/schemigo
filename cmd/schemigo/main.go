@@ -1,4 +1,4 @@
-// Command schemigo manages declarative PostgreSQL schemas.
+// Command schemigo manages declarative PostgreSQL and MySQL schemas.
 package main
 
 import (
@@ -27,7 +27,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 	}
 	flags := flag.NewFlagSet("schemigo", flag.ContinueOnError)
 	flags.SetOutput(diagnostics)
-	dsn := flags.String("d", "", "PostgreSQL connection URL")
+	dsn := flags.String("d", "", "PostgreSQL or MySQL connection URL")
 	dir := flags.String("dir", "./schema", "Go schema directory")
 	schemaName := flags.String("schema", "", "database schema (defaults to public or the MySQL database)")
 	export := flags.Bool("export", false, "export current database schema")

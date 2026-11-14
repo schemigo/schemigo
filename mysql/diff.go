@@ -48,7 +48,7 @@ func (*Driver) Diff(ctx context.Context, _ *sql.Conn, current, desired schemigo.
 	}
 	for _, old := range current.Views {
 		next, found := findView(desired.Views, old.Name)
-		if !found || strings.TrimSpace(old.Definition) != strings.TrimSpace(next.Definition) {
+		if !found || !sameViewDefinition(old.Definition, next.Definition, current.Name) {
 			plan.Statements = append(plan.Statements, ddl("DROP VIEW IF EXISTS "+Qualified(current.Name, old.Name), true))
 		}
 	}
@@ -64,7 +64,7 @@ func (*Driver) Diff(ctx context.Context, _ *sql.Conn, current, desired schemigo.
 	plan.Statements = append(plan.Statements, routineStatements...)
 	for _, next := range desired.Views {
 		old, found := findView(current.Views, next.Name)
-		if !found || strings.TrimSpace(old.Definition) != strings.TrimSpace(next.Definition) {
+		if !found || !sameViewDefinition(old.Definition, next.Definition, current.Name) {
 			plan.Statements = append(plan.Statements, ddl("CREATE OR REPLACE VIEW "+Qualified(desired.Name, next.Name)+" AS "+strings.TrimSpace(next.Definition), false))
 		}
 	}
@@ -86,6 +86,9 @@ func validateMySQLSchema(schema schemigo.Schema) error {
 		return fmt.Errorf("MySQL does not support extensions or standalone enum objects")
 	}
 	for _, table := range schema.Tables {
+		if strings.EqualFold(table.Name, "schema_migrations") {
+			return fmt.Errorf("table %q is reserved for migration history", table.Name)
+		}
 		if table.Engine != "" || table.OrderBy != "" || table.PartitionBy != "" {
 			return fmt.Errorf("table %q: ClickHouse options are unsupported", table.Name)
 		}
@@ -101,6 +104,9 @@ func validateMySQLSchema(schema schemigo.Schema) error {
 		}
 	}
 	for _, view := range schema.Views {
+		if strings.EqualFold(view.Name, "schema_migrations") {
+			return fmt.Errorf("view %q is reserved for migration history", view.Name)
+		}
 		if view.Materialized {
 			return fmt.Errorf("view %q: materialized views are unsupported", view.Name)
 		}
@@ -161,7 +167,13 @@ func findFunction(functions []schemigo.Function, name string) (schemigo.Function
 }
 
 func sameFunction(a, b schemigo.Function) bool {
-	return a.Name == b.Name && a.Parameters == b.Parameters && a.Returns == b.Returns && a.Body == b.Body && strings.EqualFold(a.Language, b.Language)
+	return a.Name == b.Name && canonicalRoutineSignature(a.Parameters) == canonicalRoutineSignature(b.Parameters) &&
+		canonicalType(a.Returns) == canonicalType(b.Returns) && strings.TrimSpace(a.Body) == strings.TrimSpace(b.Body) &&
+		strings.EqualFold(a.Language, b.Language)
+}
+
+func canonicalRoutineSignature(value string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.Join(strings.Fields(value), " "), "`", ""))
 }
 
 func tableChanged(current, desired []schemigo.Table, name string) bool {
