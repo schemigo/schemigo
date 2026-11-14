@@ -25,6 +25,8 @@
       "parameters": {
         "required_status_checks": [
           {"context": "All tests (PostgreSQL 18)"},
+          {"context": "All tests (MySQL 8.4)"},
+          {"context": "All tests (ClickHouse 25.8)"},
           {"context": "Build (linux/amd64)"},
           {"context": "Build (windows/amd64)"},
           {"context": "Build (darwin/amd64)"},

@@ -107,3 +107,92 @@ func TestApplyEmptyPlan(t *testing.T) {
 		t.Fatalf("unexpected lifecycle: %v", steps)
 	}
 }
+
+type lostSessionDriver struct{ noopMigrationDriver }
+
+func (d lostSessionDriver) MigrationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	child, cancel := context.WithCancel(ctx)
+	cancel()
+	return child, cancel
+}
+func (d lostSessionDriver) Inspect(ctx context.Context, c *sql.Conn, s string) (schemigo.Schema, error) {
+	if err := ctx.Err(); err != nil {
+		return schemigo.Schema{}, err
+	}
+	return d.noopMigrationDriver.Inspect(ctx, c, s)
+}
+func TestApplyStopsOnLostLockSession(t *testing.T) {
+	db := sql.OpenDB(exportConnector{})
+	defer db.Close()
+	var steps []string
+	err := schemigo.Apply(t.Context(), db, lostSessionDriver{noopMigrationDriver{steps: &steps}}, "public", schemigo.Schema{Name: "public"}, schemigo.ApplyOptions{NoBackup: true})
+	if err == nil || strings.Join(steps, ",") != "lock,unlock" {
+		t.Fatalf("err=%v steps=%v", err, steps)
+	}
+}
+
+type sessionConnector struct {
+	cancel   *context.CancelFunc
+	executed *[]string
+}
+
+func (c sessionConnector) Connect(context.Context) (driver.Conn, error) {
+	return sessionConn{cancel: c.cancel, executed: c.executed}, nil
+}
+func (sessionConnector) Driver() driver.Driver { return exportSQLDriver{} }
+
+type sessionConn struct {
+	exportConn
+	cancel   *context.CancelFunc
+	executed *[]string
+}
+
+func (c sessionConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	*c.executed = append(*c.executed, query)
+	(*c.cancel)()
+	return driver.RowsAffected(0), nil
+}
+
+type sessionMigrationDriver struct {
+	noopMigrationDriver
+	cancel   *context.CancelFunc
+	recorded *bool
+}
+
+func (d sessionMigrationDriver) MigrationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	child, cancel := context.WithCancel(ctx)
+	*d.cancel = cancel
+	return child, cancel
+}
+func (d sessionMigrationDriver) Diff(context.Context, *sql.Conn, schemigo.Schema, schemigo.Schema) (schemigo.Plan, error) {
+	return schemigo.Plan{Statements: []schemigo.Statement{{SQL: "first", OutsideTransaction: true}, {SQL: "second", OutsideTransaction: true}}}, nil
+}
+func (sessionMigrationDriver) Validate(ctx context.Context, _ *sql.Conn, _ schemigo.Statement) error {
+	return ctx.Err()
+}
+func (sessionMigrationDriver) EnsureHistory(ctx context.Context, _ *sql.Conn, _ string) error {
+	return ctx.Err()
+}
+func (d sessionMigrationDriver) RecordMigration(context.Context, *sql.Conn, string, schemigo.Migration) error {
+	*d.recorded = true
+	return nil
+}
+func TestApplyStopsBeforeNextStatementOnLockSessionLoss(t *testing.T) {
+	var cancel context.CancelFunc
+	var executed, steps []string
+	recorded := false
+	db := sql.OpenDB(sessionConnector{&cancel, &executed})
+	defer db.Close()
+	d := sessionMigrationDriver{noopMigrationDriver{steps: &steps}, &cancel, &recorded}
+	err := schemigo.Apply(t.Context(), db, d, "public", schemigo.Schema{Name: "public"}, schemigo.ApplyOptions{NoBackup: true})
+	if err == nil || strings.Join(executed, ",") != "first" || recorded {
+		t.Fatalf("err=%v executed=%v recorded=%v", err, executed, recorded)
+	}
+	var failure *schemigo.ApplyError
+	if !errors.As(err, &failure) || failure.CompletedStatements != 1 {
+		t.Fatalf("completed statement lost after session cancellation: %v", err)
+	}
+	if steps[len(steps)-1] != "unlock" {
+		t.Fatal("lock leaked")
+	}
+}

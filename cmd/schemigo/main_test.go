@@ -60,3 +60,11 @@ func TestRunErrorsReturnOne(t *testing.T) {
 		}
 	}
 }
+
+func TestClickHouseApplyRequiresKeeper(t *testing.T) {
+	var out, diagnostics bytes.Buffer
+	code := run(t.Context(), []string{"-d", "clickhouse://user:secret@127.0.0.1:9000/default", "-yes"}, strings.NewReader(""), &out, &diagnostics)
+	if code != 1 || !strings.Contains(diagnostics.String(), "-keeper") || strings.Contains(diagnostics.String(), "secret") {
+		t.Fatalf("code=%d stderr=%q", code, diagnostics.String())
+	}
+}

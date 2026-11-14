@@ -22,7 +22,10 @@ type UnlockFunc func(context.Context) error
 // Validate checks a command; Lock serializes migrations for a namespace.
 // EnsureHistory creates the history store; HasMigration queries past events,
 // RecordMigration appends an event, and ListMigrations reads history.
-// Callers must keep the connection open through lock release.
+// Callers must keep the connection open through lock release. A driver backed by
+// an external lease can additionally implement MigrationContext(context.Context)
+// (context.Context, context.CancelFunc); Apply uses it after Lock to stop work
+// when ownership is lost. It cannot fence commands already accepted by the server.
 type Driver interface {
 	Name() string
 	Inspect(context.Context, *sql.Conn, string) (Schema, error)

@@ -1,4 +1,4 @@
-// Command schemigo manages declarative PostgreSQL and MySQL schemas.
+// Command schemigo manages declarative database schemas.
 package main
 
 import (
@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/schemigo/schemigo"
+	"github.com/schemigo/schemigo/clickhouse"
 	"github.com/schemigo/schemigo/mysql"
 	"github.com/schemigo/schemigo/postgres"
 )
@@ -27,13 +28,14 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 	}
 	flags := flag.NewFlagSet("schemigo", flag.ContinueOnError)
 	flags.SetOutput(diagnostics)
-	dsn := flags.String("d", "", "PostgreSQL or MySQL connection URL")
+	dsn := flags.String("d", "", "PostgreSQL, MySQL or ClickHouse connection URL")
 	dir := flags.String("dir", "./schema", "Go schema directory")
-	schemaName := flags.String("schema", "", "database schema (defaults to public or the MySQL database)")
+	schemaName := flags.String("schema", "", "database schema (defaults to public for PostgreSQL or the URL database)")
 	export := flags.Bool("export", false, "export current database schema")
 	dryRun := flags.Bool("dry-run", false, "print migration SQL without applying it")
 	yes := flags.Bool("yes", false, "apply without confirmation")
 	history := flags.Bool("history", false, "show migration history")
+	keeper := flags.String("keeper", "", "Keeper/ZooKeeper host:port,... for ClickHouse Apply")
 	noBackup := flags.Bool("no-backup", false, "do not save a schema snapshot")
 	if err := flags.Parse(args); err != nil {
 		return 1
@@ -51,24 +53,37 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		return 1
 	}
 	u, err := url.Parse(*dsn)
-	if err != nil || u.Scheme != "postgres" && u.Scheme != "postgresql" && u.Scheme != "mysql" {
-		fmt.Fprintln(diagnostics, "schemigo: unsupported database URL scheme; use postgres://, postgresql:// or mysql://")
+	if err != nil || u.Scheme != "postgres" && u.Scheme != "postgresql" && u.Scheme != "clickhouse" && u.Scheme != "mysql" {
+		fmt.Fprintln(diagnostics, "schemigo: unsupported database URL scheme; use postgres://, postgresql://, mysql:// or clickhouse://")
 		return 1
 	}
 	var db *sql.DB
 	var driver schemigo.Driver
-	if u.Scheme == "mysql" {
+	if u.Scheme == "clickhouse" {
+		if !*export && !*history && !*dryRun && *keeper == "" {
+			fmt.Fprintln(diagnostics, "schemigo: ClickHouse Apply requires -keeper")
+			return 1
+		}
+		if !visitedFlag(flags, "schema") {
+			*schemaName = strings.TrimPrefix(u.Path, "/")
+			if *schemaName == "" {
+				*schemaName = "default"
+			}
+		}
+		db, err = clickhouse.Open(*dsn)
+		driver = clickhouse.New(nil)
+	} else if u.Scheme == "mysql" {
 		if *schemaName == "" {
 			*schemaName = strings.TrimPrefix(u.Path, "/")
 		}
-		driver = mysql.New()
 		db, err = mysql.Open(*dsn)
+		driver = mysql.New()
 	} else {
 		if *schemaName == "" {
 			*schemaName = "public"
 		}
-		driver = postgres.New()
 		db, err = postgres.Open(*dsn)
+		driver = postgres.New()
 	}
 	if err != nil {
 		fmt.Fprintln(diagnostics, "schemigo:", safeError(err, *dsn))
@@ -117,6 +132,16 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 					}
 				}
 				if err == nil {
+					if u.Scheme == "clickhouse" {
+						var locker clickhouse.Locker
+						locker, err = clickhouse.NewKeeperLocker(ctx, strings.Split(*keeper, ","), "/schemigo")
+						if err != nil {
+							fmt.Fprintln(diagnostics, "schemigo:", safeError(err, *dsn))
+							return 1
+						}
+						defer locker.Close()
+						driver = clickhouse.New(locker)
+					}
 					err = schemigo.Apply(ctx, db, driver, *schemaName, desired, schemigo.ApplyOptions{NoBackup: *noBackup, ExpectedHash: plan.SHA256()})
 					if err == nil {
 						fmt.Fprintln(out, "Applied.")
@@ -158,4 +183,14 @@ func printSQL(out io.Writer, sql string) error {
 	}
 	_, err = fmt.Fprint(out, sqlKeywords.ReplaceAllString(sql, "${1}\x1b[36m${2}\x1b[0m${3}"))
 	return err
+}
+
+func visitedFlag(flags *flag.FlagSet, name string) bool {
+	found := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }
