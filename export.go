@@ -70,10 +70,14 @@ func publishSchema(ctx context.Context, schema Schema, dir string, unpinVersions
 	if err != nil {
 		return fmt.Errorf("export schema: %w", err)
 	}
+	return publishSchemaFiles(ctx, location.dir, files)
+}
+
+func publishSchemaFiles(ctx context.Context, dir string, files map[string][]byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	parent := filepath.Dir(location.dir)
+	parent := filepath.Dir(dir)
 	if err := os.MkdirAll(parent, 0755); err != nil {
 		return fmt.Errorf("export schema: %w", err)
 	}
@@ -102,15 +106,15 @@ func publishSchema(ctx context.Context, schema Schema, dir string, unpinVersions
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := emptyExportDirectory(location.dir); err != nil {
+	if err := emptyExportDirectory(dir); err != nil {
 		return err
 	}
 	// Remove only an empty directory, never a tree. Rename publishes the complete
 	// output; if another writer filled the destination, removal/rename fails.
-	if err := os.Remove(location.dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("export schema: publish: %w", err)
 	}
-	if err := os.Rename(staging, location.dir); err != nil {
+	if err := os.Rename(staging, dir); err != nil {
 		return fmt.Errorf("export schema: publish: %w", err)
 	}
 	return nil
