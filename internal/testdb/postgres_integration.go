@@ -33,6 +33,10 @@ var server struct {
 // Call os.Exit(testdb.Run(m)) from TestMain. The container starts lazily in Postgres.
 func Run(m *testing.M) int {
 	code := m.Run()
+	if err := stopMySQL(); err != nil {
+		fmt.Fprintln(os.Stderr, "remove mysql container:", err)
+		code = 1
+	}
 	if server.db != nil {
 		if err := server.db.Close(); err != nil {
 			fmt.Fprintln(os.Stderr, "close postgres admin:", err)
