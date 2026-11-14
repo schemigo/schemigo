@@ -22,14 +22,24 @@ type ApplyOptions struct {
 // A snapshot describes database objects; it does not restore table data.
 type ApplyError struct {
 	BackupPath string
-	Err        error
+	// CompletedStatements counts DDL statements committed before the failure.
+	CompletedStatements int
+	Err                 error
 }
 
 func (e *ApplyError) Error() string {
-	if e.BackupPath == "" {
-		return fmt.Sprintf("apply migration: %v", e.Err)
+	detail := fmt.Sprintf("apply migration: %v", e.Err)
+	if e.CompletedStatements > 0 {
+		word := "statements"
+		if e.CompletedStatements == 1 {
+			word = "statement"
+		}
+		detail += fmt.Sprintf("; %d %s completed", e.CompletedStatements, word)
 	}
-	return fmt.Sprintf("apply migration: %v; schema snapshot: %s; restore with schemigo -d <dsn> -dir %q", e.Err, e.BackupPath, e.BackupPath)
+	if e.BackupPath == "" {
+		return detail
+	}
+	return fmt.Sprintf("%s; schema snapshot: %s; restore with schemigo -d <dsn> -dir %q", detail, e.BackupPath, e.BackupPath)
 }
 func (e *ApplyError) Unwrap() error { return e.Err }
 
@@ -80,16 +90,17 @@ func Apply(ctx context.Context, db *sql.DB, driver Driver, schemaName string, de
 		return &ApplyError{Err: fmt.Errorf("acquire connection: %w", e)}
 	}
 	backupPath := ""
+	completed := 0
 	defer func() {
 		if err == nil && backupPath != "" {
 			if e := os.RemoveAll(backupPath); e != nil {
-				err = &ApplyError{BackupPath: backupPath, Err: fmt.Errorf("remove snapshot: %w", e)}
+				err = &ApplyError{BackupPath: backupPath, CompletedStatements: completed, Err: fmt.Errorf("remove snapshot: %w", e)}
 			}
 		}
 	}()
 	defer func() {
 		if e := conn.Close(); e != nil {
-			err = errors.Join(err, &ApplyError{BackupPath: backupPath, Err: fmt.Errorf("close connection: %w", e)})
+			err = errors.Join(err, &ApplyError{BackupPath: backupPath, CompletedStatements: completed, Err: fmt.Errorf("close connection: %w", e)})
 		}
 	}()
 	unlock, e := driver.Lock(ctx, conn, schemaName)
@@ -100,7 +111,7 @@ func Apply(ctx context.Context, db *sql.DB, driver Driver, schemaName string, de
 		unlockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if e := unlock(unlockCtx); e != nil {
-			err = errors.Join(err, &ApplyError{BackupPath: backupPath, Err: fmt.Errorf("unlock: %w", e)})
+			err = errors.Join(err, &ApplyError{BackupPath: backupPath, CompletedStatements: completed, Err: fmt.Errorf("unlock: %w", e)})
 		}
 	}()
 	if provider, ok := driver.(interface {
@@ -148,7 +159,9 @@ func Apply(ctx context.Context, db *sql.DB, driver Driver, schemaName string, de
 			return &ApplyError{BackupPath: backupPath, Err: fmt.Errorf("snapshot: %w", e)}
 		}
 	}
-	fail := func(e error) error { return &ApplyError{BackupPath: backupPath, Err: e} }
+	fail := func(e error) error {
+		return &ApplyError{BackupPath: backupPath, CompletedStatements: completed, Err: e}
+	}
 	if e = driver.EnsureHistory(ctx, conn, schemaName); e != nil {
 		return fail(fmt.Errorf("ensure history: %w", e))
 	}
@@ -165,6 +178,7 @@ func Apply(ctx context.Context, db *sql.DB, driver Driver, schemaName string, de
 				if e = tx.Commit(); e != nil {
 					return fail(fmt.Errorf("commit before statement %d: %w", i+1, e))
 				}
+				completed = i
 				tx = nil
 			}
 			_, e = conn.ExecContext(ctx, statement.SQL)
@@ -182,6 +196,9 @@ func Apply(ctx context.Context, db *sql.DB, driver Driver, schemaName string, de
 				_ = tx.Rollback()
 			}
 			return fail(fmt.Errorf("execute statement %d: %w", i+1, e))
+		}
+		if statement.OutsideTransaction {
+			completed = i + 1
 		}
 	}
 	if e = ctx.Err(); e != nil {
@@ -205,6 +222,7 @@ func Apply(ctx context.Context, db *sql.DB, driver Driver, schemaName string, de
 		if e = tx.Commit(); e != nil {
 			return fail(fmt.Errorf("commit migration: %w", e))
 		}
+		completed = len(plan.Statements)
 	}
 	if !recorded {
 		if e = driver.RecordMigration(ctx, conn, schemaName, migration); e != nil {

@@ -27,7 +27,15 @@ func TestRunRequiresDSN(t *testing.T) {
 
 func TestRunRejectsUnsupportedDatabase(t *testing.T) {
 	var out, diagnostics bytes.Buffer
-	if code := run(t.Context(), []string{"-d", "mysql://user:secret@localhost/db"}, strings.NewReader(""), &out, &diagnostics); code != 1 || !strings.Contains(diagnostics.String(), "unsupported") || strings.Contains(diagnostics.String(), "secret") {
+	if code := run(t.Context(), []string{"-d", "sqlite://user:secret@localhost/db"}, strings.NewReader(""), &out, &diagnostics); code != 1 || !strings.Contains(diagnostics.String(), "unsupported") || strings.Contains(diagnostics.String(), "secret") {
+		t.Fatalf("code=%d stderr=%q", code, diagnostics.String())
+	}
+}
+
+func TestRunRecognizesMySQLScheme(t *testing.T) {
+	var out, diagnostics bytes.Buffer
+	code := run(t.Context(), []string{"-d", "mysql://user:secret@localhost/db", "-history"}, strings.NewReader(""), &out, &diagnostics)
+	if code != 1 || strings.Contains(diagnostics.String(), "unsupported database URL scheme") || strings.Contains(diagnostics.String(), "secret") {
 		t.Fatalf("code=%d stderr=%q", code, diagnostics.String())
 	}
 }

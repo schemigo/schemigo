@@ -16,6 +16,7 @@ import (
 
 	"github.com/schemigo/schemigo"
 	"github.com/schemigo/schemigo/clickhouse"
+	"github.com/schemigo/schemigo/mysql"
 	"github.com/schemigo/schemigo/postgres"
 )
 
@@ -27,9 +28,9 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 	}
 	flags := flag.NewFlagSet("schemigo", flag.ContinueOnError)
 	flags.SetOutput(diagnostics)
-	dsn := flags.String("d", "", "PostgreSQL or ClickHouse connection URL")
+	dsn := flags.String("d", "", "PostgreSQL, MySQL or ClickHouse connection URL")
 	dir := flags.String("dir", "./schema", "Go schema directory")
-	schemaName := flags.String("schema", "public", "database schema")
+	schemaName := flags.String("schema", "", "database schema (defaults to public for PostgreSQL or the URL database)")
 	export := flags.Bool("export", false, "export current database schema")
 	dryRun := flags.Bool("dry-run", false, "print migration SQL without applying it")
 	yes := flags.Bool("yes", false, "apply without confirmation")
@@ -52,8 +53,8 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		return 1
 	}
 	u, err := url.Parse(*dsn)
-	if err != nil || u.Scheme != "postgres" && u.Scheme != "postgresql" && u.Scheme != "clickhouse" {
-		fmt.Fprintln(diagnostics, "schemigo: unsupported database URL scheme; use postgres://, postgresql:// or clickhouse://")
+	if err != nil || u.Scheme != "postgres" && u.Scheme != "postgresql" && u.Scheme != "clickhouse" && u.Scheme != "mysql" {
+		fmt.Fprintln(diagnostics, "schemigo: unsupported database URL scheme; use postgres://, postgresql://, mysql:// or clickhouse://")
 		return 1
 	}
 	var db *sql.DB
@@ -71,7 +72,16 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		}
 		db, err = clickhouse.Open(*dsn)
 		driver = clickhouse.New(nil)
+	} else if u.Scheme == "mysql" {
+		if *schemaName == "" {
+			*schemaName = strings.TrimPrefix(u.Path, "/")
+		}
+		db, err = mysql.Open(*dsn)
+		driver = mysql.New()
 	} else {
+		if *schemaName == "" {
+			*schemaName = "public"
+		}
 		db, err = postgres.Open(*dsn)
 		driver = postgres.New()
 	}
