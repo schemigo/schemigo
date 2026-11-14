@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/schemigo/schemigo"
+	"github.com/schemigo/schemigo/mysql"
 	"github.com/schemigo/schemigo/postgres"
 )
 
@@ -27,7 +29,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 	flags.SetOutput(diagnostics)
 	dsn := flags.String("d", "", "PostgreSQL connection URL")
 	dir := flags.String("dir", "./schema", "Go schema directory")
-	schemaName := flags.String("schema", "public", "database schema")
+	schemaName := flags.String("schema", "", "database schema (defaults to public or the MySQL database)")
 	export := flags.Bool("export", false, "export current database schema")
 	dryRun := flags.Bool("dry-run", false, "print migration SQL without applying it")
 	yes := flags.Bool("yes", false, "apply without confirmation")
@@ -49,17 +51,30 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		return 1
 	}
 	u, err := url.Parse(*dsn)
-	if err != nil || u.Scheme != "postgres" && u.Scheme != "postgresql" {
-		fmt.Fprintln(diagnostics, "schemigo: unsupported database URL scheme; use postgres:// or postgresql://")
+	if err != nil || u.Scheme != "postgres" && u.Scheme != "postgresql" && u.Scheme != "mysql" {
+		fmt.Fprintln(diagnostics, "schemigo: unsupported database URL scheme; use postgres://, postgresql:// or mysql://")
 		return 1
 	}
-	db, err := postgres.Open(*dsn)
+	var db *sql.DB
+	var driver schemigo.Driver
+	if u.Scheme == "mysql" {
+		if *schemaName == "" {
+			*schemaName = strings.TrimPrefix(u.Path, "/")
+		}
+		driver = mysql.New()
+		db, err = mysql.Open(*dsn)
+	} else {
+		if *schemaName == "" {
+			*schemaName = "public"
+		}
+		driver = postgres.New()
+		db, err = postgres.Open(*dsn)
+	}
 	if err != nil {
 		fmt.Fprintln(diagnostics, "schemigo:", safeError(err, *dsn))
 		return 1
 	}
 	defer db.Close()
-	driver := postgres.New()
 	if *export {
 		err = schemigo.Export(ctx, db, driver, *schemaName, *dir)
 		if err == nil {
