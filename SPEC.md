@@ -1,283 +1,154 @@
 # schemigo
 
-Декларативный инструмент управления миграциями PostgreSQL / MySQL / ClickHouse. Вы описываете **желаемое** состояние схемы, а schemigo вычисляет разницу с **текущим** состоянием БД и генерирует SQL для её достижения.
+Спецификация реализованного поведения декларативного управления схемами PostgreSQL, MySQL и ClickHouse. Пользователь описывает желаемую схему Go-структурами; инструмент читает текущую схему, строит SQL-план и применяет разницу. Примеры и команды разработки приведены также в [README.md](README.md).
 
-## Возможности
+## Общий контракт
 
-- **Декларативный подход** — описываете схему как код (Go-структуры), а не пишете миграции вручную.
-- **Полный diff** — сравнивает расширения, таблицы, колонки, индексы, внешние ключи, CHECK-ограничения, функции, триггеры, представления и enum-типы
-- **Безопасность** — показывает SQL перед применением, поддерживает dry-run, редактирование миграций перед запуском (если миграции редактируются нужно и проверять go структуры).
-- **RENAME detection** — определяет переименование таблиц и колонок (вместо DROP + CREATE)
-- **Идемпотентность** — все сгенерированные SQL-операторы используют `IF EXISTS` / `IF NOT EXISTS` и так далее, идемпотентно всегда.
-- **Квотирование идентификаторов** — имена с заглавными буквами, спецсимволами и зарезервированные слова (`order`, `user`, ...) корректно экранируются
-- **Синтаксическая подсветка** — SQL выводится с подсветкой через chroma
-- **Экспорт схемы** — текущая схема БД экспортируется в Go-файлы для версионирования в репозитории
+- `Schema` описывает один namespace: схему PostgreSQL или базу MySQL/ClickHouse. Объекты имеют неквалифицированные имена; драйвер квотирует идентификаторы по правилам диалекта.
+- `Normalize` проверяет общую модель и возвращает независимую копию. Драйвер дополнительно проверяет возможности своего диалекта. Непредставимые свойства отклоняются, а не молча теряются.
+- `Driver.Inspect` читает текущую схему; служебная таблица `schema_migrations` не входит в управляемые объекты. `Driver.Diff` строит план без применения DDL.
+- `PlanMigration` выполняет Inspect/Diff. `Plan.Statements` хранит порядок, SQL и признаки `Destructive`, `SkipExplain`, `OutsideTransaction`. `Plan.SQL()` предназначен для просмотра; он не кодирует границы транзакций. `Plan.SHA256()` вычисляет SHA-256 точных байтов `SQL()`.
+- `Schema.Order` задаёт предпочтения между независимыми изменениями. Порядок по умолчанию: extensions → enums → tables → functions → triggers → views; зависимости имеют приоритет.
+- Повторный Apply заново читает схему и строит оставшийся diff. Произвольный старый SQL-план не гарантированно пригоден для повторного выполнения. Пустой diff не применяет SQL и не добавляет историю; ранее записанный хеш не мешает исправлению нового drift.
 
-## Быстрый старт
+Типы, выражения, тела функций и определения views содержат SQL конкретного диалекта. Полной семантической канонизации SQL нет: для выражений с повторным diff следует использовать запись из Inspect. Go-схема и raw SQL должны происходить из доверенного источника.
 
-### 1. Экспорт текущей схемы
+## Поддерживаемые диалекты
 
-```bash
-schemigo -d "postgres://user:pass@localhost/dbname?sslmode=disable" --export 
-```
+| Возможность | PostgreSQL 18 | MySQL 8.4 | ClickHouse 25.8 |
+| --- | --- | --- | --- |
+| Таблицы, колонки, defaults, первичные ключи | Да | Да | Native Type, Engine, OrderBy, PartitionBy |
+| Индексы | Columns/Expression, Unique, Method, Where | Columns/Expression, Unique, btree | Skipping indexes: Type и положительная Granularity |
+| FK и CHECK | Да | Да | Только CHECK |
+| Extensions и отдельные Enum | Да | Нет | Нет |
+| Функции | sql/plpgsql, перегрузки | SQL-функции и процедуры без перегрузок | Серверные SQL lambda UDF |
+| Триггеры | Таблицы и обычные views | ROW, BEFORE/AFTER, вызов процедуры | Нет |
+| Views | Обычные и materialized | Обычные | Обычные и materialized |
+| Блокировка Apply | Advisory lock | GET_LOCK | Keeper/ZooKeeper |
+| Выполнение DDL | Транзакции с отдельными autocommit statements | Без общей транзакции | Без общей транзакции |
 
-Создаст директорию `./schema/` с Go-файлами, описывающими текущую схему:
+### PostgreSQL
 
-```
-schema/
-├── extensions/
-│   ├── types.go
-│   └── pg_trgm.go
-├── enums/
-│   └── types.go
-├── tables/
-│   ├── types.go
-│   ├── users.go
-│   └── orders.go
-├── functions/
-│   ├── types.go
-│   └── calculate_total.go
-├── triggers/
-│   ├── types.go
-│   └── update_timestamp.go
-└── views/
-    ├── types.go
-    └── active_users.go
-```
+`postgres.Open` принимает URL или keyword DSN и создаёт пул pgx. SQL-план поддерживает таблицы, колонки, составные PK/FK, CHECK, индексы, extensions, enum, функции, триггеры и views.
 
-### 2. Редактирование желаемой схемы
+Extensions создаются и обновляются до явно заданной версии; лишние не удаляются. Экспорт не закрепляет версию extension. Enum поддерживает создание и добавление значений с сохранением порядка. Удаление или перестановка значений требует пересоздания типа с проверкой зависимостей через подключение к БД. Пересоздание выполняется атомарным DO-блоком; неизвестные зависимости и конфликт временного имени вызывают отказ. Комментарий сохраняется, изменение owner/ACL при пересоздании отклоняется.
 
-Схема описывается **декларативно**: вы указываете, как должна выглядеть БД, а не как к ней прийти.
+Переименование таблиц/колонок определяется по единственному совпадению определения без имени; неоднозначность возвращает ошибку. Новые колонки добавляются в конец, перестановка существующих не поддерживается. `Column.Using` задаёт выражение преобразования типа. Удаления и преобразования типов отмечаются `Destructive`. Переименование колонок с raw CHECK/выражениями индексов/условиями триггеров пока отклоняется.
+
+FK временно снимаются перед изменением опорных ключей и типов колонок и восстанавливаются после создания необходимых объектов. CHECK/FK добавляются как NOT VALID и валидируются в одном DO-блоке. DROP использует RESTRICT без CASCADE. Неизвестные зависимости вызывают отказ. Индексы строятся обычным CREATE INDEX; CONCURRENTLY не поддерживается и запись может блокироваться.
+
+Функции идентифицируются именем и типами входных аргументов. Изменение тела использует CREATE OR REPLACE; изменение результата, имён параметров или удаление defaults может требовать пересоздания и проверки зависимостей. Тела функций сохраняются и сравниваются побайтно.
+
+Обычные views заменяются через CREATE OR REPLACE, когда PostgreSQL подтверждает совместимость выходных колонок. Запрос описывается через pgx в read-only транзакции без выполнения SELECT. Несовместимые изменения и materialized views требуют пересоздания. Управляемые зависимые views снимаются и восстанавливаются вместе с триггерами; неизвестные зависимости, отличающийся владелец, grants, комментарии и неподдерживаемые параметры пересоздаваемых объектов вызывают отказ. Удаление materialized view отмечается `Destructive`.
+
+Изменения существующих views и пересоздание функций/enum требуют соединения из `postgres.Open`. Зависимости функций/views выводятся консервативно по SQL-токенам: возможны ложные зависимости, динамический SQL не анализируется. Identity/generated columns, partitioning, UNIQUE constraints, INCLUDE indexes, cross-schema FK и расширенные опции функций вне модели отклоняются.
+
+### MySQL
+
+`mysql.Open` принимает `mysql://user:password@host:port/database`. Поддерживаются таблицы, колонки, индексы, PK/FK/CHECK, SQL-функции, процедуры, ROW-триггеры BEFORE/AFTER INSERT/UPDATE/DELETE и обычные views. Пустой `Function.Returns` обозначает процедуру; триггер вызывает процедуру без аргументов. При включённом binary log SQL-функции требуют характеристики `DETERMINISTIC`, `NO SQL` или `READS SQL DATA` в `Function.Body` перед телом.
+
+Extensions, отдельные Enum, materialized views, partial indexes, ClickHouse-поля таблиц и `Column.Using` отклоняются. DDL выполняется в autocommit. После частичного сбоя уже выполненные команды сохраняются; следующий Apply выполняет новый Inspect/Diff. Успешная история записывается после всех команд.
+
+### ClickHouse
+
+`clickhouse.Open` принимает `clickhouse://host:9000/database`. Таблицы требуют `Engine`; `OrderBy` и `PartitionBy` содержат raw SQL. `Engine` сохраняет аргументы и SETTINGS. Изменение engine, partition или primary key требует ручной миграции данных. Nullable задаётся через Type, например `Nullable(String)`; первичный ключ — через `Table.PrimaryKey`. Extensions, отдельные enum, FK, triggers, unique/partial indexes, MATERIALIZED/ALIAS columns, TTL и SAMPLE BY вне модели отклоняются.
+
+`Function.Parameters` содержит аргументы lambda, `Body` — выражение; Returns и перегрузки не поддерживаются. **SQL UDF принадлежат всему серверу:** Inspect включает все SQL UDF, и отсутствие функции в desired означает её удаление независимо от базы.
+
+`View.Definition` содержит SELECT обычного view либо `TO db.target AS SELECT ...` / `ENGINE = MergeTree ORDER BY ... AS SELECT ...` для materialized view. Inspect сохраняет явные колонки и DEFINER/SQL SECURITY. При пересоздании существующие security clauses сохраняются, если desired не задаёт их явно. Пересоздание materialized view с собственным storage удаляет накопленные данные и отмечается `Destructive`.
+
+Apply требует внешней блокировки. Go API: `clickhouse.NewKeeperLocker(ctx, endpoints, "/schemigo")`, затем `clickhouse.New(locker)`; вызывающий код закрывает locker. `clickhouse.New(nil)` допускает чтение, экспорт и diff, но Apply отказывает до DDL. Все миграции одного сервера, включая разные базы, должны использовать одинаковые endpoints и path. CLI использует `/schemigo`. Координатор должен находиться в доверенной сети: znodes создаются с world ACL.
+
+Keeper использует ephemeral sequential znode и watch. Close освобождает сессию. При disconnect locker становится непригоден для повторного использования и отменяет контекст Apply, останавливая дальнейшие statements. Уже принятый сервером запрос может завершиться после потери сессии; строгая защита от split-brain не гарантируется. Пользовательский Locker должен предоставлять `MigrationContext(context.Context) (context.Context, context.CancelFunc)` для уведомления Apply о потере владения.
+
+DDL выполняется без общей транзакции, история хранится на MergeTree и пополняется после полного успеха. После ошибки новый Apply читает фактическое состояние и строит оставшийся diff.
+
+## Go-схема, экспорт и генерация
+
+`schemigo.Export(ctx, db, driver, schemaName, dir)` создаёт Go-описание текущей схемы в отсутствующем или пустом каталоге внутри текущего Go-модуля. Существующие файлы не перезаписываются. Создаются `main.go` и пакеты `extensions`, `enums`, `tables`, `functions`, `triggers`, `views`; в каждом есть aliases в `types.go`, список `All` в `all.go` и отдельные файлы сущностей, например `tables/users_schema.go`.
+
+`schemigo.Load(ctx, dir)` компилирует и запускает доверенную Go-схему с `-mod=readonly`, читает один JSON-объект из stdout и возвращает нормализованную модель. Это выполнение Go-кода, поэтому требуется установленный Go и доверие к каталогу схемы. Пул БД принадлежит вызывающему коду и закрывается им.
+
+Пример PostgreSQL-таблицы в экспортированном пакете `tables`:
 
 ```go
-// schema/tables/users.go
-package tables
-
 var Users = Table{
     Name: "users",
     Columns: []Column{
-        {Name: "id", Type: "int8", NotNull: true, PrimaryKey: true, Default: "nextval('users_id_seq'::regclass)"},
-        {Name: "email", Type: "varchar(255)", NotNull: true},
-        {Name: "name", Type: "text"},
-        {Name: "role", Type: "user_role", NotNull: true, Default: "'user'"},
-        {Name: "created_at", Type: "timestamptz", Default: "now()"},
+        {Name: "id", Type: "bigint", PrimaryKey: true, NotNull: true},
+        {Name: "email", Type: "character varying(255)", NotNull: true},
     },
     Indexes: []Index{
         {Name: "idx_users_email", Columns: []string{"email"}, Unique: true},
     },
-    Checks: []Check{
-        {Name: "chk_users_email", Expression: "email ~ '^[^@]+@[^@]+$'"},
-    },
 }
 ```
-Нужно создать константы типов для колонок (Postgres / MySQL / ClickHouse) чтобы не вводить вручную. 
-Также сделать проще применение nextval('users_id_seq'::regclass) через константу или функцию где просто берется имя поля.
-Возможно импорт пакетов с этим константами например пакет postgres и postgres.Int8, postgres.Nextval(column / index)
-То есть должно быть просто и нативно.
 
+При ручном добавлении сущность включается в `All`. `Table.PrimaryKey` задаёт упорядоченный составной ключ и не совмещается с `Column.PrimaryKey`. `Function` содержит Name, Parameters, Returns, Language, Body. `Trigger.ForEach` (`ROW` по умолчанию или `STATEMENT`) имеет приоритет над legacy-полем `ForEachRow`. Возможности этих полей зависят от диалекта.
 
-### Генерация новых сущностей
+Пакеты диалектов предоставляют константы типов, например `postgres.Int8`, `mysql.BigInt`, `clickhouse.UInt64`. `postgres.Nextval(table, column)` возвращает default для обычного имени `table_column_seq`, но не создаёт sequence: она должна существовать отдельно.
 
-```bash
+Генерация без подключения к БД:
+
+```sh
 schemigo table users 'id:int8,email:varchar(255),total:numeric(10,2)'
 schemigo enum order_status 'pending,processing,shipped,delivered,cancelled'
 schemigo view active_users ./active_users.sql
 schemigo view -materialized user_totals ./user_totals.sql
 ```
 
-Команды работают без DSN, создают `./schema` при необходимости и добавляют новую сущность в соответствующий `all.go`. Для view SQL копируется в `schema/views/` и встраивается при загрузке Go-схемы. Флаги `-dir` и `-schema` указываются после команды, перед именем; `-schema` применяется при создании каталога.
+Команды создают `./schema` при необходимости и включают сущность в соответствующий `all.go`. SQL view копируется в `schema/views/` и встраивается в Go-схему. Флаги `-dir` и `-schema` указываются после команды перед именем; `-schema` применяется при создании каталога. Повторное имя, коллизия Go-символов и некорректный ввод возвращают ошибку.
 
-### 3. Применение миграций
+## CLI
 
-```bash
-schemigo -d "postgres://user:pass@localhost/dbname?sslmode=disable"
+```sh
+schemigo -d 'postgres://user:pass@localhost/dbname?sslmode=disable' -export
+# Отредактировать Go-схему в ./schema.
+schemigo -d 'postgres://user:pass@localhost/dbname?sslmode=disable' -dry-run
+schemigo -d 'postgres://user:pass@localhost/dbname?sslmode=disable' -yes
+schemigo -d 'postgres://user:pass@localhost/dbname?sslmode=disable' -history
 ```
 
-Migrator покажет сгенерированный SQL и предложит:
-- `Y` — применить миграции
-- `n` — отменить
-- `e` — открыть редактор для ручной правки SQL перед применением
+CLI выбирает драйвер по URL: `postgres://`, `postgresql://`, `mysql://`, `clickhouse://`. Для PostgreSQL схема по умолчанию `public`, для MySQL — база из URL, для ClickHouse — база из URL или `default`.
 
-### Флаги CLI
+| Флаг | Поведение |
+| --- | --- |
+| `-d` | URL подключения; обязателен для работы с БД |
+| `-dir` | Каталог Go-схемы, по умолчанию `./schema` |
+| `-schema` | Переопределение управляемой схемы/базы |
+| `-export` | Экспорт текущей схемы |
+| `-dry-run` | Построить и показать SQL без применения |
+| `-yes` | Применить без интерактивного подтверждения |
+| `-history` | Прочитать историю, не создавая её таблицу |
+| `-no-backup` | Отключить снимок схемы перед применением |
+| `-keeper` | Endpoints Keeper/ZooKeeper через запятую для ClickHouse Apply |
 
-| Флаг | Описание |
-|------|----------|
-| `-d` | Строка подключения (обязательный) |
-| `-dir` | Директория со схемой (по умолчанию `./schema`) |
-| `-schema` | Управляемая схема (по умолчанию `public`) |
-| `-export` | Экспортировать текущую схему БД в Go-файлы |
-| `-dry-run` | Показать миграции и выйти, не применяя |
-| `-yes` | Применить без подтверждения (для CI) |
-| `-history` | Показать историю применённых миграций |
-| `-no-backup` | Не создавать бэкап схемы перед применением |
+`-export`, `-dry-run` и `-history` взаимно исключаются. Без `-yes` после SQL выводится запрос `Y/n`: только `Y`/`y` подтверждает применение, пустой ответ отменяет его. Перед применением план повторно строится под блокировкой и сверяется с SHA-256 показанного SQL; изменение плана требует нового просмотра. Редактирование SQL через CLI не поддерживается.
 
-При любой ошибке CLI завершается с кодом 1 — можно безопасно использовать в CI-пайплайнах.
+В терминале основные SQL-команды выделяются ANSI-цветом; pipe, файл и `NO_COLOR` отключают цвет. Ошибки завершают CLI с кодом 1, успех и отмена — с кодом 0. Export/history/dry-run ClickHouse не подключаются к Keeper.
 
-### Бэкап и восстановление
+## Применение, история и снимки
 
-Перед каждым применением миграций **автоматически** создаётся бэкап текущей схемы в директорию `schemigo_backup/`. При успешном применении бэкап удаляется. При ошибке — сохраняется.
+Apply получает выделенное соединение, берёт блокировку и повторяет Inspect/Diff. После проверки ожидаемого хеша и валидации команд сохраняется снимок текущих объектов в `schemigo_backup/snapshot-*`, если не задан `NoBackup`. Снимок создаётся только для непустого плана. Проверка PostgreSQL/MySQL использует EXPLAIN для подходящих statements; `SkipExplain` пропускает DDL/DO-блоки. ClickHouse проверяет DDL при выполнении. Dry-run не является полноценной проверкой исполнимости всех миграций на сервере.
 
-```bash
-# Применить миграции (бэкап создаётся автоматически)
-schemigo -d "postgres://user:pass@localhost/db"
+Обычные PostgreSQL statements выполняются транзакционно; `OutsideTransaction` фиксирует предшествующую транзакцию и выполняется в autocommit. Добавление enum-значений требует такого режима. Обычный SQL и запись истории PostgreSQL фиксируются одной транзакцией; уже выполненные autocommit-команды сохраняются при последующей ошибке. MySQL/ClickHouse используют autocommit для DDL.
 
-# Отключить бэкап
-schemigo -d "postgres://user:pass@localhost/db" -no-backup
+История `schema_migrations` содержит SHA-256 SQL, серверное время и пользователя БД. Запись добавляется после успешного плана; хеш не обязан быть уникальным. `History` читает журнал без создания таблицы. Снимок удаляется после успеха и сохраняется при ошибке; `ApplyError` сообщает путь и число уже зафиксированных statements.
 
-# Восстановить схему из бэкапа
-schemigo -d "postgres://user:pass@localhost/db" -dir ./schema_backup
+**Снимок содержит только определения объектов, без данных.** Его можно передать через `-dir` как желаемую схему для нового планирования, но это не автоматический откат и не восстановление удалённых строк. Отдельные изменения требуют ручной миграции данных.
+
+## Проверки и CI
+
+Требуется Go из `go.mod` (1.27). Unit-тесты работают без БД; интеграционные файлы отделены тегом `integration` и разрешением `SCHEMIGO_TESTCONTAINERS=1`. Testcontainers создаёт одноразовые PostgreSQL 18, MySQL 8.4, ClickHouse 25.8 и ZooKeeper 3.9.3; существующие пользовательские БД для тестов не нужны.
+
+```sh
+GOTOOLCHAIN=local go test -mod=readonly -race -shuffle=on -count=1 ./...
+GOTOOLCHAIN=local go vet -mod=readonly -tags=integration ./...
+SCHEMIGO_TESTCONTAINERS=1 GOTOOLCHAIN=local go test -mod=readonly -race -shuffle=on -tags=integration -count=1 -timeout=10m ./...
 ```
 
-При ошибке миграции выводится инструкция по восстановлению с точным путём к бэкапу.
+CI проверяет все unit-тесты, форматирование и vet отдельно. Три независимых jobs запускают пакеты соответствующих диалектов и CLI на PostgreSQL 18, MySQL 8.4 и ClickHouse 25.8 параллельно, с `-race`, `-shuffle=on`, `-count=1`. Фильтрация в общем CLI-пакете исключает сценарии чужих БД. JSON-отчёты и покрытие сохраняются в артефактах каждого диалекта.
 
-### История миграций и блокировка
+Отдельная матрица проверяет кросс-компиляцию всех обычных пакетов и линковку CLI для linux/amd64, windows/amd64, darwin/amd64 и darwin/arm64 с `CGO_ENABLED=0`. Запуск бинарников на Windows/macOS этими jobs не проверяется.
 
-- Применённые миграции записываются в таблицу `schema_migrations` (SHA-256 хеш SQL, время, пользователь). Применение пропускается при пустом текущем diff; ранее записанный хеш не препятствует повторному применению после drift. Сама таблица истории исключена из diff.
-- PostgreSQL использует advisory lock. ClickHouse Apply требует Keeper/ZooKeeper: CLI `-keeper host:port,...`, Go API `clickhouse.NewKeeperLocker`. Без координатора разрешены только чтение, экспорт и dry-run.
-- Перед применением SQL валидируется через `EXPLAIN` (DDL и DO-блоки пропускаются, т.к. EXPLAIN их не поддерживает).
-
-### ClickHouse
-
-`clickhouse://` выбирает ClickHouse; база задаётся URL или `-schema`. Таблицы требуют Engine; OrderBy и PartitionBy задаются raw SQL. Поддерживаются колонки, skipping indexes (Type/Granularity), CHECK, SQL lambda functions, обычные и materialized views. Изменение engine/partition/primary key требует ручной миграции данных. Отдельные enum, Extensions, FK и Trigger отклоняются. Для materialized view Definition включает TO/ENGINE и AS SELECT; явные колонки и DEFINER/SQL SECURITY сохраняются при экспорте. Пересоздание собственного storage удаляет данные materialized view.
-
-SQL UDF принадлежат всему серверу: Inspect включает их все, а diff удаляет отсутствующие в desired. Миграции разных баз используют одну очередь Keeper; все клиенты должны использовать один path (CLI: `/schemigo`) и endpoints. Координатор — доверенный, znodes создаются с world ACL. Ephemeral sequential znode и watch обеспечивают взаимное исключение участников этой очереди. Close освобождает сессию. Disconnect отменяет контекст Apply и дальнейшие SQL statements; уже запущенный запрос может завершиться после потери сессии, поэтому строгая защита от split-brain не заявляется.
-
-ClickHouse DDL не объединяется в транзакцию; история на MergeTree пополняется только после успеха. После частичного сбоя повторный Apply начинает с нового Inspect/Diff. Снимок сохраняет только схему. Engine сохраняет SETTINGS; непредставимые TTL/SAMPLE BY и MATERIALIZED/ALIAS columns отклоняются; сравнение SQL не включает полную семантическую канонизацию. Интеграционные сценарии проходят на одноразовых ClickHouse 25.8 и ZooKeeper 3.9.3; CI запускает их отдельным обязательным check наряду с PostgreSQL 18.
-
-## Типы сущностей
-
-### Extension
-
-```go
-Extension{
-    Name: "pg_trgm",
-}
-
-// С закреплённой версией (обычно не требуется)
-Extension{
-    Name:    "postgis",
-    Version: "3.4.2",
-}
-```
-
-Генерируется идемпотентный `CREATE EXTENSION IF NOT EXISTS`. Если `Version` задана и отличается от установленной — `ALTER EXTENSION ... UPDATE TO`. При экспорте версия не закрепляется.
-
-**Расширения create-only**: удаление schemigo не генерирует (`DROP EXTENSION CASCADE` уничтожил бы зависимые объекты вместе с данными) — лишние расширения удаляются вручную.
-
-### Enum
-
-```go
-Enum{
-    Name:   "order_status",
-    Values: []string{"pending", "processing", "shipped", "delivered", "cancelled"},
-}
-```
-
-Поддерживается добавление и удаление значений. При удалении значений создаётся новый тип `_new`, затем тип переименовывается.
-
-### Table
-
-```go
-Table{
-    Name: "orders",
-    Columns: []Column{
-        {Name: "id", Type: "int8", NotNull: true, PrimaryKey: true},
-        {Name: "user_id", Type: "int8", NotNull: true},
-        {Name: "total", Type: "numeric(10,2)"},
-        {Name: "status", Type: "order_status", Default: "'pending'"},
-    },
-    Indexes: []Index{
-        {Name: "idx_orders_user_id", Columns: []string{"user_id"}},
-        {Name: "idx_orders_active", Columns: []string{"user_id"}, Where: "(status = 'pending')"},
-        {Name: "idx_orders_lower_email", Expression: "lower(email)"},
-    },
-    ForeignKeys: []ForeignKey{
-        {
-            Name:              "fk_orders_user_id",
-            Columns:           []string{"user_id"},
-            ReferencedTable:   "users",
-            ReferencedColumns: []string{"id"},
-            OnDelete:          "CASCADE",
-        },
-    },
-    Checks: []Check{
-        {Name: "chk_orders_total", Expression: "total >= 0"},
-    },
-}
-```
-
-**Column** поддерживает:
-- `Using` — кастомное выражение для `ALTER TYPE ... USING`
-- `PrimaryKey` — детектится при извлечении
-
-**Index** поддерживает:
-- `Method` — `btree` (по умолчанию), `hash`, `gist`, `gin`
-- `Where` — частичные индексы: `"status = 'active'"`
-- `Expression` — expression-индексы: `"lower(email)"`
-
-### Function
-
-```go
-Function{
-    Name:       "get_user_orders",
-    Returns:    "TABLE(order_id int8, total numeric)",
-    Language:   "sql",
-    Parameters: "p_user_id int8",
-    Body:       `SELECT id, total FROM orders WHERE user_id = p_user_id;`,
-}
-```
-
-### Trigger
-
-```go
-Trigger{
-    Name:       "trg_update_timestamp",
-    When:       "BEFORE",
-    Event:      "INSERT OR UPDATE",
-    Table:      "users",
-    ForEach:    "ROW",
-    ForEachRow: true,
-    Condition:  "OLD.name IS DISTINCT FROM NEW.name",
-    Function:   "update_modified_column",
-}
-```
-
-- `When`: `BEFORE`, `AFTER`, `INSTEAD OF`
-- `ForEach`: `ROW` (по умолчанию), `STATEMENT`
-- `Condition`: опциональное `WHEN`-условие
-
-### View
-
-```go
-View{
-    Name:         "active_users",
-    Definition:   "SELECT id, email, name FROM users WHERE deleted_at IS NULL",
-    Materialized: false,
-}
-```
-
-При изменении определения:
-- **Добавление колонок в конец** → `CREATE OR REPLACE VIEW` (быстро)
-- **Удаление/перестановка колонок** → `DROP VIEW ... CASCADE` + `CREATE VIEW` (безопасно)
-- **Смена типа** (view ↔ materialized view) → полное пересоздание
-
-### Программное использование
-
-
-По умолчанию: **extensions → enums → tables → functions → triggers → views**
-
-Этот порядок можно изменить:
-
-### Возможности
-
-- Для новых таблиц / enum возможность генерации шаблонного кода то есть вызов schemigo -> table имя и колонки через запятую с типами, в общем главное чтобы удобно было
-- Возможность использовать как CLI / так и в коде Go
-- Сделать удобнее создание и редактирование VIEW 
-- Сделать возможность проверки миграций без применения UP / DOWN (то есть проверяется корректность SQL и собственно миграций)
-
-### Проблемы
- - Если редактируется миграция как обеспечить корректность схемы? Может вообще убрать редактирование
- - Как обеспечить выполнение миграций если нужно обеспечить порядок применения SQL инструкций например при изменении enum?
-
-### Что нужно сделать
- - Интеграционные тесты на поддерживаемые БД и функционал, то есть в контейнере поднимаем БД и накатываем таблицы / измененяем колонки / индексы и соотвественно с enum, view основные сценарии
+[Локальный шаблон ruleset](.github/rulesets/required-tests.json) перечисляет обязательные проверки. Файл не включает защиту ветки автоматически: его нужно импортировать или обновить в настройках GitHub. Наличие файла не подтверждает, что удалённое правило уже применено.

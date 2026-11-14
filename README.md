@@ -2,7 +2,7 @@
 
 Декларативное управление схемами PostgreSQL, MySQL и ClickHouse.
 
-Реализованы общая модель схемы, `Normalize`, SQL-план с SHA-256 и драйверы PostgreSQL и MySQL. `postgres.Open(dsn)` создаёт пул pgx из URL или keyword DSN; `mysql.Open(dsn)` принимает `mysql://user:password@host:port/database`. `Open` проверяет формат DSN без подключения; доступность сервера проверяется через `PingContext`, пул закрывается вызывающим кодом. PostgreSQL 18 проверен unit- и интеграционными тестами. CLI поддерживает экспорт, просмотр SQL, применение и историю миграций для PostgreSQL и MySQL.
+Реализованы общая модель схемы, `Normalize`, SQL-план с SHA-256 и драйверы всех трёх диалектов. `postgres.Open(dsn)` создаёт пул pgx из URL или keyword DSN; `mysql.Open(dsn)` принимает `mysql://user:password@host:port/database`, `clickhouse.Open(dsn)` — `clickhouse://host:9000/database`. `Open` проверяет формат DSN без подключения; доступность сервера проверяется через `PingContext`, пул закрывается вызывающим кодом. CLI поддерживает экспорт, просмотр SQL, применение и историю миграций для всех трёх диалектов.
 
 MySQL 8.4 проверен на таблицах, колонках, индексах, FK, CHECK, SQL-функциях, процедурах, триггерах и представлениях. Для функций при включённом binary log укажите в `Function.Body` характеристику `DETERMINISTIC`, `NO SQL` или `READS SQL DATA` перед телом. MySQL DDL не транзакционен: при ошибке `Apply` сообщает число выполненных команд и путь к снимку схемы; повторный запуск достраивает частично применённую схему. Extensions, отдельные Enum, materialized views и partial indexes в MySQL отклоняются с ошибкой.
 
@@ -74,10 +74,10 @@ DDL выполняется без общей транзакции. Истори�
 
 Keeper использует ephemeral sequential znode и watch без polling. Закрытие сессии освобождает lock. При любом disconnect locker становится непригоден для повторного использования, отменяет контекст Apply и останавливает дальнейшие statements. **Уже принятый ClickHouse запрос может завершиться после потери сессии: строгая защита от split-brain не гарантируется.** Пользовательский Locker должен предоставлять `MigrationContext(context.Context) (context.Context, context.CancelFunc)` для уведомления о потере владения; без него Apply видит только отмену контекста вызывающего кода.
 
-Unit/race/vet проверки и интеграционные сценарии на реальных ClickHouse 25.8 и ZooKeeper 3.9.3 проходят. GitHub Actions параллельно запускает независимые jobs PostgreSQL 18, MySQL 8.4 и ClickHouse 25.8, с `-race`, `-shuffle=on`, `-count=1`, отчётами и покрытием. ClickHouse fixtures создают одноразовые контейнеры через testcontainers; PostgreSQL job исключает тесты с `MySQL` в имени и `TestClickHouse*`; MySQL job запускает тесты с `MySQL` в имени, включая CLI; ClickHouse job запускает `TestClickHouse*`. Все три check указаны в `.github/rulesets/required-tests.json`. Локальный запуск:
+Интеграционные тесты ClickHouse используют одноразовые ClickHouse 25.8 и ZooKeeper 3.9.3 через testcontainers. CI и команды проверки всех диалектов описаны в разделе «Разработка». Локальный запуск только ClickHouse и его CLI:
 
 ```sh
-SCHEMIGO_TESTCONTAINERS=1 GOTOOLCHAIN=local go test -mod=readonly -tags=integration ./clickhouse ./cmd/schemigo -run ClickHouse -v
+SCHEMIGO_TESTCONTAINERS=1 GOTOOLCHAIN=local go test -mod=readonly -race -shuffle=on -tags=integration -count=1 ./clickhouse ./cmd/schemigo -skip '^TestCLIMySQL|^TestCLIPostgres' -v
 ```
 
 ## Генерация Go-схемы
@@ -105,8 +105,7 @@ schemigo view -materialized user_totals ./user_totals.sql
 | `postgres/` | Диалект PostgreSQL |
 | `mysql/` | Диалект MySQL |
 | `clickhouse/` | Диалект ClickHouse и координация блокировок |
-| `internal/testdb/` | Запуск одноразового PostgreSQL для интеграционных тестов |
-| `docs/superpowers/plans/` | План реализации |
+| `internal/testdb/` | Одноразовые PostgreSQL, MySQL, ClickHouse и ZooKeeper для интеграционных тестов |
 
 Файлы `*_test.go` добавляются рядом с реализацией по мере разработки. Интеграционные тесты отделены тегом `integration`. Каталог `schema/` — будущий результат экспорта пользовательской схемы, а не внутренний пакет инструмента.
 
@@ -115,22 +114,30 @@ schemigo view -materialized user_totals ./user_totals.sql
 Версия Go в существующем `go.mod`: **1.27**. Команды ниже требуют соответствующего toolchain:
 
 ```sh
-go vet -mod=readonly ./...
-go test -mod=readonly ./...
+GOTOOLCHAIN=local go vet -mod=readonly -tags=integration ./...
+GOTOOLCHAIN=local go test -mod=readonly -race -shuffle=on -count=1 ./...
 go build -mod=readonly ./...
 ```
 
-Unit-тесты модели, валидации, SQL-плана и PostgreSQL inspector работают без БД. Модули pgx и testcontainers подключены для интеграционных проверок; версия Go остаётся 1.27. Разрешены fixtures в одноразовых контейнерах PostgreSQL; ограничения на применение к существующим БД сохраняются в [плане](docs/superpowers/plans/2026-11-09-schemigo.md).
+Unit-тесты всех диалектов работают без БД. Для интеграционных проверок нужны Docker и явное разрешение на запуск одноразовых контейнеров:
 
-Интеграционные тесты используют pgx и testcontainers из `go.mod`. Для запуска нужны Docker и команда `SCHEMIGO_TESTCONTAINERS=1 go test -mod=readonly -tags=integration ./...`. Helper лениво запускает один контейнер PostgreSQL 18 на тестовый пакет; каждый вызов `testdb.Postgres(t)` создаёт отдельную БД из `template0` и удаляет её через `t.Cleanup`. `TestMain` вызывает `os.Exit(testdb.Run(m))`, чтобы удалить контейнер после завершения всех тестов. Параллельные тесты используют независимые БД; роли и другие объекты уровня кластера нужно явно очищать. Без переменной включения тесты с тегом `integration` собираются и пропускают запуск контейнера.
+```sh
+SCHEMIGO_TESTCONTAINERS=1 GOTOOLCHAIN=local go test -mod=readonly -race -shuffle=on -tags=integration -count=1 -timeout=10m ./...
+```
 
-GitHub Actions запускает все unit- и интеграционные тесты при открытии/повторном открытии PR и каждом пуше в его ветку (`pull_request: synchronize`). Workflow [Tests](.github/workflows/tests.yml) использует Go из `go.mod` и параллельную matrix из PostgreSQL 18, MySQL 8.4 и ClickHouse 25.8; каждый прогон запускает реальные контейнеры своего диалекта с `-race`, `-shuffle=on` и без кеширования результатов тестов. Между прогонами нет `needs`, `fail-fast: false` позволяет остальным закончить при ошибке одного из диалектов. В логе старт пакета выделен голубым, успешные тесты — зелёным, упавшие — красным, пропущенные — жёлтым. Шаг `Report test failures` выводит обычные строки: пакет, статус, длительность и счётчики passed/failed/skipped. Summary показывает те же данные в таблице со статусами ✅/❌/⏭️ и общим итогом; счётчики включают subtests. Ниже в обоих представлениях выводятся имя упавшего теста и диагностический контекст, включая ошибки сборки. Длительность пакета берётся из `go test -json`; значение меньше миллисекунды обозначается `<0.001s`, отсутствие времени при ошибке сборки — `n/a`. Показатель `0s` рядом с шагом отчёта означает округлённое время его генерации, а не длительность тестов. Ссылка на Summary выводится в конце отчёта. Полные JSON-логи, stderr и покрытие сохраняются в отдельных артефактах `test-results-postgres`, `test-results-mysql` и `test-results-clickhouse` на 14 дней.
+Helpers лениво запускают по одному контейнеру PostgreSQL 18 и MySQL 8.4 на тестовый пакет; каждый тест получает отдельную БД, удаляемую через `t.Cleanup`. `TestMain` вызывает `os.Exit(testdb.Run(m))`, чтобы удалить общие контейнеры после завершения всех тестов. Роли и другие объекты уровня кластера нужно явно очищать. ClickHouse и ZooKeeper создаются отдельно для каждого вызова fixture и удаляются через `t.Cleanup`. Без `SCHEMIGO_TESTCONTAINERS=1` тесты с тегом `integration` собираются, но сценарии с контейнерами пропускаются.
+
+Workflow [Tests](.github/workflows/tests.yml) запускается при открытии/повторном открытии PR и каждом пуше в его ветку. Версия Go берётся из `go.mod`. Отдельный job `Unit tests` проверяет форматирование всех Go-файлов, vet с тегом `integration` и все unit-тесты с `-race`, `-shuffle=on`, `-count=1`.
+
+Параллельная matrix запускает PostgreSQL 18, MySQL 8.4 и ClickHouse 25.8. Каждый job проверяет целиком пакет своего драйвера и общий пакет `cmd/schemigo`, исключая CLI-сценарии остальных диалектов через `-skip`. Так новые тесты драйвера попадают в CI независимо от имени. Используются реальные одноразовые контейнеры, `-race`, `-shuffle=on`, `-count=1` и таймаут 10 минут на пакет. Между jobs нет `needs`; `fail-fast: false` позволяет остальным диалектам закончить при ошибке одного.
+
+Цветной лог и Summary показывают статусы пакетов, длительность, счётчики passed/failed/skipped (включая subtests) и диагностику ошибок тестов и сборки. Полные JSON-логи, stderr и покрытие сохраняются в отдельных артефактах `test-results-postgres`, `test-results-mysql` и `test-results-clickhouse` на 14 дней.
 
 Параллельно с тестами CI проверяет сборку Linux/amd64, Windows/amd64 и macOS (darwin/amd64, darwin/arm64). Все цели компилируются на Linux с `CGO_ENABLED=0`; `go build -mod=readonly -o "$RUNNER_TEMP/build/" ./...` проверяет все обычные пакеты и линкует CLI. Зависимости и результаты компиляции кешируются отдельно для каждой цели и версии Go. Контейнеры и тесты повторно в build-job не запускаются, бинарники не публикуются. Это проверка кросс-компиляции; запуск программ на Windows/macOS не проверяется.
 
-Слияние PR в основную ветку разрешается только после успешных `All tests (PostgreSQL 18)`, `All tests (MySQL 8.4)`, `All tests (ClickHouse 25.8)` и всех четырёх `Build (...)` на актуальной версии ветки. Для этого подготовлен [ruleset](.github/rulesets/required-tests.json): обязательный PR и status checks, без bypass-исключений. **Файл в репозитории не включает защиту автоматически.** Администратор должен [импортировать ruleset](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/managing-rulesets-for-a-repository#importing-a-ruleset) через [Settings → Rules → Rulesets](https://github.com/alaleks/schemigo/settings/rules) → New ruleset → Import a ruleset, проверить `Active`, основную ветку и обязательные checks, затем нажать Create. Если правило уже создано, нужно добавить в него checks MySQL/ClickHouse и четыре build-check’а. Проверка включения: PR с упавшим или ещё не завершившимся check должен блокировать Merge, в том числе для администратора без bypass. Применение правила на GitHub из текущего окружения не выполнялось: авторизация API отсутствует.
+Подготовленный [ruleset](.github/rulesets/required-tests.json) требует PR и успешные `Unit tests`, `All tests (PostgreSQL 18)`, `All tests (MySQL 8.4)`, `All tests (ClickHouse 25.8)` и все четыре `Build (...)` на актуальной версии ветки, без bypass-исключений. **Файл в репозитории не включает защиту автоматически.** Администратор должен импортировать или обновить ruleset в настройках GitHub; до этого новая обязательная проверка не действует.
 
 Inspector исключает `schema_migrations`, объекты расширений и constraint triggers. Поддерживаются триггеры на таблицах и обычных views, включая `INSTEAD OF`; materialized views не могут быть целью триггера. Для свойств вне текущей модели, например identity/generated columns, partitioning, UNIQUE constraints, INCLUDE indexes, cross-schema FK и расширенных опций функций, возвращается ошибка. PostgreSQL поддерживает Validate, Lock и методы истории.
 
-Требования: [SPEC.md](SPEC.md). Стандарт кода: [CODING_STANDARDS.md](CODING_STANDARDS.md). Этапы: [план реализации](docs/superpowers/plans/2026-11-09-schemigo.md).
+Требования и ограничения: [SPEC.md](SPEC.md). Стандарт кода: [CODING_STANDARDS.md](CODING_STANDARDS.md).
 
