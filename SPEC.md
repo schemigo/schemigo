@@ -132,9 +132,17 @@ schemigo -d "postgres://user:pass@localhost/db" -dir ./schema_backup
 
 ### История миграций и блокировка
 
-- Применённые миграции записываются в таблицу `schema_migrations` (SHA-256 хеш SQL, время, пользователь). Повторное применение того же набора миграций пропускается. Сама таблица истории исключена из diff.
-- Перед применением берётся advisory lock — параллельные запуски migrator на одной БД невозможны.
+- Применённые миграции записываются в таблицу `schema_migrations` (SHA-256 хеш SQL, время, пользователь). Применение пропускается при пустом текущем diff; ранее записанный хеш не препятствует повторному применению после drift. Сама таблица истории исключена из diff.
+- PostgreSQL использует advisory lock. ClickHouse Apply требует Keeper/ZooKeeper: CLI `-keeper host:port,...`, Go API `clickhouse.NewKeeperLocker`. Без координатора разрешены только чтение, экспорт и dry-run.
 - Перед применением SQL валидируется через `EXPLAIN` (DDL и DO-блоки пропускаются, т.к. EXPLAIN их не поддерживает).
+
+### ClickHouse
+
+`clickhouse://` выбирает ClickHouse; база задаётся URL или `-schema`. Таблицы требуют Engine; OrderBy и PartitionBy задаются raw SQL. Поддерживаются колонки, skipping indexes (Type/Granularity), CHECK, SQL lambda functions, обычные и materialized views. Изменение engine/partition/primary key требует ручной миграции данных. Отдельные enum, Extensions, FK и Trigger отклоняются. Для materialized view Definition включает TO/ENGINE и AS SELECT; явные колонки и DEFINER/SQL SECURITY сохраняются при экспорте. Пересоздание собственного storage удаляет данные materialized view.
+
+SQL UDF принадлежат всему серверу: Inspect включает их все, а diff удаляет отсутствующие в desired. Миграции разных баз используют одну очередь Keeper; все клиенты должны использовать один path (CLI: `/schemigo`) и endpoints. Координатор — доверенный, znodes создаются с world ACL. Ephemeral sequential znode и watch обеспечивают взаимное исключение участников этой очереди. Close освобождает сессию. Disconnect отменяет контекст Apply и дальнейшие SQL statements; уже запущенный запрос может завершиться после потери сессии, поэтому строгая защита от split-brain не заявляется.
+
+ClickHouse DDL не объединяется в транзакцию; история на MergeTree пополняется только после успеха. После частичного сбоя повторный Apply начинает с нового Inspect/Diff. Снимок сохраняет только схему. Engine сохраняет SETTINGS; непредставимые TTL/SAMPLE BY и MATERIALIZED/ALIAS columns отклоняются; сравнение SQL не включает полную семантическую канонизацию. Интеграционные сценарии проходят на одноразовых ClickHouse 25.8 и ZooKeeper 3.9.3; CI запускает их отдельным обязательным check наряду с PostgreSQL 18.
 
 ## Типы сущностей
 

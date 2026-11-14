@@ -55,12 +55,23 @@ jobs:
         run: go build -mod=readonly -o "$RUNNER_TEMP/build/" ./...
 
   tests:
-    name: All tests (PostgreSQL 18)
+    name: All tests (${{ matrix.database }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dialect: postgres
+            database: PostgreSQL 18
+            test_filter: -skip
+          - dialect: clickhouse
+            database: ClickHouse 25.8
+            test_filter: -run
     env:
       GOTOOLCHAIN: local
       SCHEMIGO_TESTCONTAINERS: '1'
+      TEST_FILTER: ${{ matrix.test_filter }}
     defaults:
       run:
         shell: bash
@@ -78,6 +89,7 @@ jobs:
         id: tests
         run: |
           go test -mod=readonly -race -shuffle=on -tags=integration -count=1 -timeout=10m \
+            "$TEST_FILTER" '^TestClickHouse' \
             -coverprofile="$RUNNER_TEMP/coverage.out" -json ./... \
             2> "$RUNNER_TEMP/test-stderr.log" | tee "$RUNNER_TEMP/test-results.json" \
             | jq --unbuffered -r '
@@ -177,7 +189,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: test-results
+          name: test-results-${{ matrix.dialect }}
           path: |
             ${{ runner.temp }}/test-results.json
             ${{ runner.temp }}/test-stderr.log

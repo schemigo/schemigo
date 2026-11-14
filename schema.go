@@ -126,6 +126,8 @@ type Trigger struct {
 }
 
 // View describes a view with a raw SQL Definition and optional Materialized storage.
+// For ClickHouse materialized views, Definition includes TO/ENGINE and AS SELECT;
+// ordinary views contain SELECT, optionally prefixed by DEFINER/SQL SECURITY and AS.
 type View struct {
 	Name         string `json:"name"`
 	Definition   string `json:"definition"`

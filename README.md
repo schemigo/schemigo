@@ -49,6 +49,35 @@ schemigo -d 'postgres://user:password@localhost/db?sslmode=disable' -history
 
 По умолчанию Go-схема читается из `./schema`, управляемая схема БД — `public`. Их можно изменить через `-dir` и `-schema`. Без `-yes` CLI показывает SQL и запрашивает `Y/n`; пустой ответ и `n` отменяют применение. Перед применением показанный план сверяется с новым планом под блокировкой; при изменении БД CLI попросит просмотреть SQL заново. `-dry-run` только показывает план и не создаёт журнал или снимок. `-no-backup` отключает снимок перед применением. При ошибке применения выводится точный путь сохранённого снимка. Для терминала выделяются основные SQL-команды ANSI-цветом, а в pipe или файл выводится обычный SQL. Для этой подсветки новая зависимость не добавлялась.
 
+## ClickHouse
+
+Реализованы `clickhouse.Open`, `clickhouse.New`, Inspect/Diff, Export/Load, Apply и история на MergeTree. CLI принимает `clickhouse://`; база по умолчанию берётся из URL (или `default`), `-schema` переопределяет её.
+
+```sh
+schemigo -d 'clickhouse://localhost:9000/analytics' -export
+schemigo -d 'clickhouse://localhost:9000/analytics' -dry-run
+schemigo -d 'clickhouse://localhost:9000/analytics' -keeper 'localhost:2181' -yes
+schemigo -d 'clickhouse://localhost:9000/analytics' -history
+```
+
+Для Go API создайте `locker, err := clickhouse.NewKeeperLocker(ctx, endpoints, "/schemigo")`, проверьте ошибку и закройте locker через `defer locker.Close()`. Передайте `clickhouse.New(locker)` в `schemigo.Apply`. `clickhouse.New(nil)` поддерживает чтение, экспорт и diff; Apply отказывает до DDL. Dry-run/export/history не подключаются к Keeper, даже если передан `-keeper`.
+
+Поддерживаются таблицы с обязательным `Engine` и SQL clauses `OrderBy`/`PartitionBy`, колонки с native Type и DEFAULT, skipping indexes с `Type` и положительной `Granularity`, CHECK, SQL lambda functions, обычные и materialized views. Nullable задаётся в Type, например `Nullable(String)`; `Table.PrimaryKey` содержит имена колонок отдельного первичного ключа. Engine содержит имя и аргументы движка, например `ReplacingMergeTree(version)`, и при необходимости `SETTINGS ...`; настройки сохраняются при экспорте. Изменение engine, partition или primary key требует ручной миграции данных. Extensions, отдельные enum, FK, triggers, unique/partial indexes, MATERIALIZED/ALIAS columns и непредставимые table clauses (`TTL`, `SAMPLE BY`) возвращают ошибку.
+
+`Function.Parameters` — список аргументов lambda, `Body` — её выражение; Returns и перегрузки не поддерживаются. **SQL-функции глобальны для сервера:** Inspect включает все SQL UDF, и отсутствие функции в desired означает её удаление независимо от базы. Поэтому все миграции используют общую очередь блокировки, включая разные базы. Все клиенты одного сервера должны использовать одинаковые Keeper endpoints и path; CLI использует `/schemigo`. Координатор должен находиться в доверенной сети: создаваемые znodes используют world ACL. Клиентские изменения в обход этой блокировки не координируются.
+
+`View.Definition` содержит SELECT обычного view; для materialized view — `TO db.target AS SELECT ...` либо `ENGINE = MergeTree ORDER BY ... AS SELECT ...`. Inspect сохраняет также явные колонки и security clauses. При пересоздании существующие DEFINER/SQL SECURITY сохраняются, если desired не задаёт их явно. Пересоздание materialized view с собственным storage удаляет накопленные данные и отмечается Destructive. Views создаются после таблиц и функций; зависимости между views/functions определяются консервативно по SQL-токенам. Совпадение имени объекта с именем колонки может дать ложную зависимость. Сравнение выражений не является полной SQL-канонизацией; при повторном diff используйте запись из Inspect.
+
+DDL выполняется без общей транзакции. История записывается только после полного успеха; пустой diff не добавляет событие, ранее встречавшийся хеш не мешает устранению drift. После ошибки повторный Apply заново читает схему и строит оставшийся diff. Снимок содержит только схему и не восстанавливает удалённые данные.
+
+Keeper использует ephemeral sequential znode и watch без polling. Закрытие сессии освобождает lock. При любом disconnect locker становится непригоден для повторного использования, отменяет контекст Apply и останавливает дальнейшие statements. **Уже принятый ClickHouse запрос может завершиться после потери сессии: строгая защита от split-brain не гарантируется.** Пользовательский Locker должен предоставлять `MigrationContext(context.Context) (context.Context, context.CancelFunc)` для уведомления о потере владения; без него Apply видит только отмену контекста вызывающего кода.
+
+Unit/race/vet проверки и интеграционные сценарии на реальных ClickHouse 25.8 и ZooKeeper 3.9.3 проходят. GitHub Actions запускает отдельные jobs PostgreSQL 18 и ClickHouse 25.8, с `-race`, `-shuffle=on`, `-count=1`, отчётами и покрытием. ClickHouse fixtures создают одноразовые контейнеры через testcontainers; PostgreSQL job исключает `TestClickHouse*`, а ClickHouse job запускает их, включая CLI. Оба check указаны в `.github/rulesets/required-tests.json`. Локальный запуск:
+
+```sh
+SCHEMIGO_TESTCONTAINERS=1 GOTOOLCHAIN=local go test -mod=readonly -tags=integration ./clickhouse ./cmd/schemigo -run ClickHouse -v
+```
+
 ## Генерация Go-схемы
 
 Команды ниже создают `./schema`, если каталог ещё не существует, или добавляют сущность в экспортированную схему. Подключение к БД не требуется. Флаги команды ставятся перед именем сущности; `-dir` задаёт другой каталог, а `-schema` — имя схемы при создании нового каталога (по умолчанию `public`).

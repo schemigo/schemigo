@@ -103,6 +103,13 @@ func Apply(ctx context.Context, db *sql.DB, driver Driver, schemaName string, de
 			err = errors.Join(err, &ApplyError{BackupPath: backupPath, Err: fmt.Errorf("unlock: %w", e)})
 		}
 	}()
+	if provider, ok := driver.(interface {
+		MigrationContext(context.Context) (context.Context, context.CancelFunc)
+	}); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = provider.MigrationContext(ctx)
+		defer cancel()
+	}
 	current, e := driver.Inspect(ctx, conn, schemaName)
 	if e != nil {
 		return &ApplyError{Err: fmt.Errorf("inspect: %w", e)}
@@ -147,6 +154,12 @@ func Apply(ctx context.Context, db *sql.DB, driver Driver, schemaName string, de
 	}
 	var tx *sql.Tx
 	for i, statement := range plan.Statements {
+		if e = ctx.Err(); e != nil {
+			if tx != nil {
+				_ = tx.Rollback()
+			}
+			return fail(fmt.Errorf("before statement %d: %w", i+1, e))
+		}
 		if statement.OutsideTransaction {
 			if tx != nil {
 				if e = tx.Commit(); e != nil {
@@ -170,6 +183,12 @@ func Apply(ctx context.Context, db *sql.DB, driver Driver, schemaName string, de
 			}
 			return fail(fmt.Errorf("execute statement %d: %w", i+1, e))
 		}
+	}
+	if e = ctx.Err(); e != nil {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+		return fail(e)
 	}
 	migration := Migration{Hash: plan.SHA256()}
 	recorded := false
