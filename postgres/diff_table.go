@@ -327,10 +327,16 @@ func createTable(s schemigo.Schema, t schemigo.Table) schemigo.Statement {
 	for _, check := range t.Checks {
 		checkNames += "," + QuoteLiteral(check.Name)
 	}
+	triggerNames := "''"
+	for _, trigger := range s.Triggers {
+		if trigger.Table == t.Name {
+			triggerNames += "," + QuoteLiteral(trigger.Name)
+		}
+	}
 	checks = append(checks,
 		"NOT EXISTS (SELECT FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class ic ON ic.oid=i.indexrelid WHERE i.indrelid="+relation+" AND NOT i.indisprimary AND ic.relname NOT IN ("+indexNames+"))",
 		"NOT EXISTS (SELECT FROM pg_catalog.pg_constraint WHERE conrelid="+relation+" AND (contype IN ('u','x') OR (contype='f' AND conname NOT IN ("+fkNames+")) OR (contype='c' AND conname NOT IN ("+checkNames+"))))",
-		"NOT EXISTS (SELECT FROM pg_catalog.pg_trigger WHERE tgrelid="+relation+" AND NOT tgisinternal)")
+		"NOT EXISTS (SELECT FROM pg_catalog.pg_trigger WHERE tgrelid="+relation+" AND NOT tgisinternal AND tgname NOT IN ("+triggerNames+"))")
 	body := "IF " + relation + " IS NULL THEN CREATE TABLE IF NOT EXISTS " + qualified + " (" + strings.Join(definitions, ", ") + "); ELSE IF NOT (" + strings.Join(checks, " AND ") + ") THEN RAISE EXCEPTION 'existing table definition differs; replan'; END IF;\n"
 	for _, c := range t.Columns {
 		body += setDefaultSQL(qualified, c) + ";\n"

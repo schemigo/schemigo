@@ -33,7 +33,7 @@ func diffFromDB(t *testing.T, db *sql.DB, desired schemigo.Schema) schemigo.Plan
 func assertConverged(t *testing.T, db *sql.DB, desired schemigo.Schema) {
 	t.Helper()
 	if p := diffFromDB(t, db, desired); len(p.Statements) != 0 {
-		t.Fatalf("repeated diff is not empty:\n%s", p.SQL())
+		t.Fatalf("repeated diff is not empty:\n%s\ncurrent views: %#v\ndesired views: %#v", p.SQL(), inspect(t, db, desired.Name).Views, desired.Views)
 	}
 }
 
@@ -360,33 +360,50 @@ func TestTableManagedSchemaScope(t *testing.T) {
 	execFixture(t, db, `INSERT INTO "a.b".t DEFAULT VALUES`)
 }
 
-func TestRenameDependentViewRefused(t *testing.T) {
-	db := testdb.Postgres(t)
-	execFixture(t, db, `CREATE TABLE public.t(value bigint); INSERT INTO public.t VALUES (17); CREATE VIEW public.v AS SELECT value FROM public.t`)
-	before := inspect(t, db, "public")
-	desired, err := schemigo.Normalize(before)
-	if err != nil {
-		t.Fatal(err)
-	}
-	desired.Tables[0].Name = "renamed"
-	p := diffFromDB(t, db, desired)
-	if _, err := db.ExecContext(t.Context(), p.Statements[0].SQL); err == nil {
-		t.Fatal("table rename ignored dependent raw view definition")
-	}
-	if !reflect.DeepEqual(before, inspect(t, db, "public")) {
-		t.Fatal("refused rename changed schema")
-	}
-	desired, err = schemigo.Normalize(before)
-	if err != nil {
-		t.Fatal(err)
-	}
-	desired.Tables[0].Columns[0].Name = "renamed"
-	p = diffFromDB(t, db, desired)
-	if _, err := db.ExecContext(t.Context(), p.Statements[0].SQL); err == nil {
-		t.Fatal("column rename ignored dependent raw view definition")
-	}
-	if !reflect.DeepEqual(before, inspect(t, db, "public")) {
-		t.Fatal("refused rename changed schema")
+func TestRenameDependentViewMigration(t *testing.T) {
+	for _, target := range []string{"table", "column"} {
+		t.Run(target, func(t *testing.T) {
+			db := testdb.Postgres(t)
+			execFixture(t, db, `CREATE TABLE public.t(value bigint); INSERT INTO public.t VALUES (17); CREATE VIEW public.v AS SELECT value FROM public.t`)
+			before := inspect(t, db, "public")
+			desired, err := schemigo.Normalize(before)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target == "table" {
+				desired.Tables[0].Name = "renamed"
+				desired.Views[0].Definition = "SELECT value FROM renamed"
+			} else {
+				desired.Tables[0].Columns[0].Name = "renamed"
+				desired.Views[0].Definition = "SELECT renamed AS value FROM t"
+			}
+			p := diffFromDB(t, db, desired)
+			// The full plan drops the view first. Executing the rename alone must
+			// still refuse to leave an existing raw view definition out of sync.
+			renameFound := false
+			for _, statement := range p.Statements {
+				if strings.Contains(statement.SQL, " RENAME ") {
+					renameFound = true
+					if _, err := db.ExecContext(t.Context(), statement.SQL); err == nil {
+						t.Fatal("rename ignored dependent raw view definition")
+					}
+					break
+				}
+			}
+			if !renameFound {
+				t.Fatal("plan has no rename", p.SQL())
+			}
+			if !reflect.DeepEqual(before, inspect(t, db, "public")) {
+				t.Fatal("refused rename changed schema")
+			}
+			executePlan(t, db, p)
+			executePlan(t, db, p)
+			assertConverged(t, db, desired)
+			var value int
+			if err := db.QueryRowContext(t.Context(), "SELECT value FROM public.v").Scan(&value); err != nil || value != 17 {
+				t.Fatalf("view after rename: value=%d err=%v", value, err)
+			}
+		})
 	}
 }
 
