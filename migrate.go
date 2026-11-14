@@ -14,6 +14,8 @@ import (
 type ApplyOptions struct {
 	NoBackup  bool
 	BackupDir string
+	// ExpectedHash, when set, requires the locked plan to match the SQL preview.
+	ExpectedHash string
 }
 
 // ApplyError reports an unsuccessful migration and the preserved schema snapshot.
@@ -108,6 +110,9 @@ func Apply(ctx context.Context, db *sql.DB, driver Driver, schemaName string, de
 	plan, e := driver.Diff(ctx, conn, current, desired)
 	if e != nil {
 		return &ApplyError{Err: fmt.Errorf("diff: %w", e)}
+	}
+	if options.ExpectedHash != "" && plan.SHA256() != options.ExpectedHash {
+		return &ApplyError{Err: fmt.Errorf("plan changed after preview; review the SQL again")}
 	}
 	if len(plan.Statements) == 0 {
 		return nil
