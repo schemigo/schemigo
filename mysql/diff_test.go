@@ -70,6 +70,25 @@ func TestDiffMySQLNoop(t *testing.T) {
 	}
 }
 
+func TestDiffMySQLTypeAliasesDoNotCreateDrift(t *testing.T) {
+	current := schemigo.Schema{Name: "app", Tables: []schemigo.Table{{Name: "users", Columns: []schemigo.Column{{Name: "id", Type: "bigint"}, {Name: "active", Type: "tinyint(1)"}}}}}
+	desired := schemigo.Schema{Name: "app", Tables: []schemigo.Table{{Name: "users", Columns: []schemigo.Column{{Name: "id", Type: "int8"}, {Name: "active", Type: mysql.Boolean}}}}}
+	plan, err := mysql.New().Diff(t.Context(), nil, current, desired)
+	if err != nil || len(plan.Statements) != 0 {
+		t.Fatalf("MySQL type aliases created drift: %+v, %v", plan, err)
+	}
+}
+
+func TestDiffMySQLTypeAliasesDoNotRecreateTrigger(t *testing.T) {
+	current := schemigo.Schema{Name: "app", Tables: []schemigo.Table{{Name: "users", Columns: []schemigo.Column{{Name: "active", Type: "tinyint(1)"}}}}, Functions: []schemigo.Function{{Name: "audit_user", Body: "BEGIN SET @audit_seen = 1; END"}}, Triggers: []schemigo.Trigger{{Name: "users_audit", Table: "users", When: "AFTER", Event: "INSERT", Function: "audit_user"}}}
+	desired := current
+	desired.Tables = []schemigo.Table{{Name: "users", Columns: []schemigo.Column{{Name: "active", Type: mysql.Boolean}}}}
+	plan, err := mysql.New().Diff(t.Context(), nil, current, desired)
+	if err != nil || len(plan.Statements) != 0 {
+		t.Fatalf("type alias recreated trigger: %+v, %v", plan, err)
+	}
+}
+
 func TestDiffRejectsUnsupportedMySQLObjects(t *testing.T) {
 	base := schemigo.Schema{Name: "app"}
 	for _, test := range []struct {

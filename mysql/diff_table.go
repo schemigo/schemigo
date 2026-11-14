@@ -9,7 +9,12 @@ import (
 	"github.com/schemigo/schemigo"
 )
 
-func sameTable(a, b schemigo.Table) bool { return reflect.DeepEqual(a, b) }
+func sameTable(a, b schemigo.Table) bool {
+	return a.Name == b.Name && slices.EqualFunc(a.Columns, b.Columns, sameColumn) &&
+		slices.Equal(a.PrimaryKey, b.PrimaryKey) && reflect.DeepEqual(a.Indexes, b.Indexes) &&
+		reflect.DeepEqual(a.ForeignKeys, b.ForeignKeys) && reflect.DeepEqual(a.Checks, b.Checks) &&
+		a.Engine == b.Engine && a.OrderBy == b.OrderBy && a.PartitionBy == b.PartitionBy
+}
 
 func diffTables(current, desired schemigo.Schema) ([]schemigo.Statement, error) {
 	oldTables := make(map[string]schemigo.Table, len(current.Tables))
@@ -227,7 +232,17 @@ func diffTable(schema string, old, next schemigo.Table) ([]schemigo.Statement, [
 }
 
 func sameColumn(a, b schemigo.Column) bool {
-	return strings.EqualFold(strings.TrimSpace(a.Type), strings.TrimSpace(b.Type)) && a.Name == b.Name && a.NotNull == b.NotNull && a.Default == b.Default && a.PrimaryKey == b.PrimaryKey
+	return canonicalType(a.Type) == canonicalType(b.Type) && a.Name == b.Name && a.NotNull == b.NotNull && a.Default == b.Default && a.PrimaryKey == b.PrimaryKey
+}
+
+func canonicalType(value string) string {
+	typ := strings.ToLower(strings.Join(strings.Fields(value), " "))
+	for _, alias := range []struct{ from, to string }{{"int8", "bigint"}, {"int4", "int"}, {"integer", "int"}, {"int2", "smallint"}, {"bool", "tinyint(1)"}, {"boolean", "tinyint(1)"}, {"numeric", "decimal"}} {
+		if typ == alias.from || strings.HasPrefix(typ, alias.from+" ") || strings.HasPrefix(typ, alias.from+"(") {
+			return alias.to + strings.TrimPrefix(typ, alias.from)
+		}
+	}
+	return typ
 }
 
 func findIndex(indexes []schemigo.Index, name string) (schemigo.Index, bool) {
