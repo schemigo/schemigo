@@ -24,6 +24,7 @@
       "type": "required_status_checks",
       "parameters": {
         "required_status_checks": [
+          {"context": "Unit tests"},
           {"context": "All tests (PostgreSQL 18)"},
           {"context": "All tests (MySQL 8.4)"},
           {"context": "All tests (ClickHouse 25.8)"},

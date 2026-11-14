@@ -9,6 +9,37 @@ permissions:
   contents: read
 
 jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [[ -n "$unformatted" ]]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet all packages including integration tests
+        run: go vet -mod=readonly -tags=integration ./...
+
+      - name: Run all unit tests
+        run: go test -mod=readonly -race -shuffle=on -count=1 -timeout=5m ./...
+
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
@@ -64,21 +95,18 @@ jobs:
         include:
           - dialect: postgres
             database: PostgreSQL 18
-            test_filter: -skip
-            test_pattern: '^TestClickHouse|MySQL'
+            skip_pattern: '^TestClickHouse|^TestCLIMySQL'
           - dialect: mysql
             database: MySQL 8.4
-            test_filter: -run
-            test_pattern: 'MySQL'
+            skip_pattern: '^TestClickHouse|^TestCLIPostgres'
           - dialect: clickhouse
             database: ClickHouse 25.8
-            test_filter: -run
-            test_pattern: '^TestClickHouse'
+            skip_pattern: '^TestCLIMySQL|^TestCLIPostgres'
     env:
       GOTOOLCHAIN: local
       SCHEMIGO_TESTCONTAINERS: '1'
-      TEST_FILTER: ${{ matrix.test_filter }}
-      TEST_PATTERN: ${{ matrix.test_pattern }}
+      DIALECT: ${{ matrix.dialect }}
+      SKIP_PATTERN: ${{ matrix.skip_pattern }}
     defaults:
       run:
         shell: bash
@@ -96,8 +124,8 @@ jobs:
         id: tests
         run: |
           go test -mod=readonly -race -shuffle=on -tags=integration -count=1 -timeout=10m \
-            "$TEST_FILTER" "$TEST_PATTERN" \
-            -coverprofile="$RUNNER_TEMP/coverage.out" -json ./... \
+            -skip "$SKIP_PATTERN" \
+            -coverprofile="$RUNNER_TEMP/coverage.out" -json "./$DIALECT" ./cmd/schemigo \
             2> "$RUNNER_TEMP/test-stderr.log" | tee "$RUNNER_TEMP/test-results.json" \
             | jq --unbuffered -r '
                 def color(code): "\u001b[" + code + "m" + . + "\u001b[0m";
