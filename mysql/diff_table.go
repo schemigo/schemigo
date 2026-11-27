@@ -12,7 +12,7 @@ import (
 func sameTable(a, b schemigo.Table) bool {
 	return a.Name == b.Name && slices.EqualFunc(a.Columns, b.Columns, sameColumn) &&
 		slices.Equal(a.PrimaryKey, b.PrimaryKey) && reflect.DeepEqual(a.Indexes, b.Indexes) &&
-		reflect.DeepEqual(a.ForeignKeys, b.ForeignKeys) && slices.EqualFunc(a.Checks, b.Checks, sameCheck) &&
+		slices.EqualFunc(a.ForeignKeys, b.ForeignKeys, sameForeignKey) && slices.EqualFunc(a.Checks, b.Checks, sameCheck) &&
 		a.Engine == b.Engine && a.OrderBy == b.OrderBy && a.PartitionBy == b.PartitionBy
 }
 
@@ -136,7 +136,7 @@ func diffTable(schema string, old, next schemigo.Table) ([]schemigo.Statement, [
 	for _, fk := range old.ForeignKeys {
 		oldFK[fk.Name] = fk
 		newFK, found := findForeignKey(next.ForeignKeys, fk.Name)
-		if !found || !reflect.DeepEqual(fk, newFK) {
+		if !found || !sameForeignKey(fk, newFK) {
 			statements = append(statements, guardedDDL(schema, next.Name, "table_constraints", "constraint_name", fk.Name, true, "ALTER TABLE "+ref+" DROP FOREIGN KEY "+QuoteIdent(fk.Name), true))
 		}
 	}
@@ -224,7 +224,7 @@ func diffTable(schema string, old, next schemigo.Table) ([]schemigo.Statement, [
 		}
 	}
 	for _, fk := range next.ForeignKeys {
-		if previous, found := oldFK[fk.Name]; !found || !reflect.DeepEqual(previous, fk) {
+		if previous, found := oldFK[fk.Name]; !found || !sameForeignKey(previous, fk) {
 			foreignKeys = append(foreignKeys, guardedDDL(schema, next.Name, "table_constraints", "constraint_name", fk.Name, false, addForeignKey(schema, next.Name, fk), false))
 		}
 	}
@@ -233,6 +233,14 @@ func diffTable(schema string, old, next schemigo.Table) ([]schemigo.Statement, [
 
 func sameColumn(a, b schemigo.Column) bool {
 	return canonicalType(a.Type) == canonicalType(b.Type) && a.Name == b.Name && a.NotNull == b.NotNull && a.Default == b.Default && a.PrimaryKey == b.PrimaryKey
+}
+
+func sameForeignKey(a, b schemigo.ForeignKey) bool {
+	a.OnDelete = canonicalForeignKeyAction(a.OnDelete)
+	a.OnUpdate = canonicalForeignKeyAction(a.OnUpdate)
+	b.OnDelete = canonicalForeignKeyAction(b.OnDelete)
+	b.OnUpdate = canonicalForeignKeyAction(b.OnUpdate)
+	return reflect.DeepEqual(a, b)
 }
 
 func sameCheck(a, b schemigo.Check) bool {

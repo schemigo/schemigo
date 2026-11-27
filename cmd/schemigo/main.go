@@ -11,9 +11,9 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 
+	"github.com/moby/term"
 	"github.com/schemigo/schemigo"
 	"github.com/schemigo/schemigo/clickhouse"
 	"github.com/schemigo/schemigo/mysql"
@@ -27,42 +27,42 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		return runScaffold(ctx, args, out, diagnostics)
 	}
 	flags := flag.NewFlagSet("schemigo", flag.ContinueOnError)
-	flags.SetOutput(diagnostics)
 	dsn := flags.String("d", "", "PostgreSQL, MySQL or ClickHouse connection URL")
 	dir := flags.String("dir", "./schema", "Go schema directory")
 	schemaName := flags.String("schema", "", "database schema (defaults to public for PostgreSQL or the URL database)")
 	export := flags.Bool("export", false, "export current database schema")
 	dryRun := flags.Bool("dry-run", false, "print migration SQL without applying it")
+	checkOnly := flags.Bool("check", false, "execute the PostgreSQL migration in a transaction and roll it back")
 	yes := flags.Bool("yes", false, "apply without confirmation")
 	history := flags.Bool("history", false, "show migration history")
 	keeper := flags.String("keeper", "", "Keeper/ZooKeeper host:port,... for ClickHouse Apply")
 	noBackup := flags.Bool("no-backup", false, "do not save a schema snapshot")
-	if err := flags.Parse(args); err != nil {
+	if err := parseFlags(flags, args, diagnostics); err != nil {
 		return 1
 	}
 	if *dsn == "" {
-		fmt.Fprintln(diagnostics, "schemigo: -d is required")
-		return 1
+		return reportError(diagnostics, "schemigo: -d is required")
 	}
-	if flags.NArg() != 0 || *export && (*history || *dryRun) || *history && *dryRun {
-		fmt.Fprintln(diagnostics, "schemigo: conflicting options or unexpected arguments")
-		return 1
+	conflictingCheck := *checkOnly && (*export || *history || *dryRun || *yes)
+	if flags.NArg() != 0 || *export && (*history || *dryRun) || *history && *dryRun || conflictingCheck {
+		return reportError(diagnostics, "schemigo: conflicting options or unexpected arguments")
 	}
 	if err := ctx.Err(); err != nil {
-		fmt.Fprintln(diagnostics, "schemigo:", err)
-		return 1
+		return reportError(diagnostics, "schemigo: "+err.Error())
 	}
 	u, err := url.Parse(*dsn)
 	if err != nil || u.Scheme != "postgres" && u.Scheme != "postgresql" && u.Scheme != "clickhouse" && u.Scheme != "mysql" {
-		fmt.Fprintln(diagnostics, "schemigo: unsupported database URL scheme; use postgres://, postgresql://, mysql:// or clickhouse://")
-		return 1
+		return reportError(diagnostics,
+			"schemigo: unsupported database URL scheme; use postgres://, postgresql://, mysql:// or clickhouse://")
+	}
+	if *checkOnly && u.Scheme != "postgres" && u.Scheme != "postgresql" {
+		return reportError(diagnostics, "schemigo: -check requires PostgreSQL")
 	}
 	var db *sql.DB
 	var driver schemigo.Driver
 	if u.Scheme == "clickhouse" {
 		if !*export && !*history && !*dryRun && *keeper == "" {
-			fmt.Fprintln(diagnostics, "schemigo: ClickHouse Apply requires -keeper")
-			return 1
+			return reportError(diagnostics, "schemigo: ClickHouse Apply requires -keeper")
 		}
 		if !visitedFlag(flags, "schema") {
 			*schemaName = strings.TrimPrefix(u.Path, "/")
@@ -86,8 +86,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		driver = postgres.New()
 	}
 	if err != nil {
-		fmt.Fprintln(diagnostics, "schemigo:", safeError(err, *dsn))
-		return 1
+		return reportError(diagnostics, "schemigo: "+safeError(err, *dsn))
 	}
 	defer db.Close()
 	if *export {
@@ -111,48 +110,50 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 			plan, err = schemigo.PlanMigration(ctx, db, driver, *schemaName, desired)
 			if err == nil {
 				if len(plan.Statements) == 0 {
-					fmt.Fprintln(out, "No changes.")
+					if err := printNoChanges(out); err != nil {
+						return reportError(diagnostics, "schemigo: "+safeError(err, *dsn))
+					}
 					return 0
 				}
-				if err = printSQL(out, plan.SQL()); err != nil {
-					fmt.Fprintln(diagnostics, "schemigo:", safeError(err, *dsn))
-					return 1
+				if err = printSQL(out, plan, driver.Name()); err != nil {
+					return reportError(diagnostics, "schemigo: "+safeError(err, *dsn))
 				}
 				if *dryRun {
 					return 0
 				}
 				if !*yes {
-					fmt.Fprint(out, "Apply migration? [Y/n]: ")
-					answer, readErr := bufio.NewReader(in).ReadString('\n')
-					if readErr != nil && !errors.Is(readErr, io.EOF) {
-						err = readErr
-					} else if strings.TrimSpace(answer) != "Y" && strings.TrimSpace(answer) != "y" {
-						fmt.Fprintln(out, "Cancelled.")
+					var check func() error
+					if pg, ok := driver.(*postgres.Driver); ok {
+						check = func() error {
+							return pg.CheckMigration(ctx, db, *schemaName, desired, plan.SHA256())
+						}
+					}
+					proceed, confirmErr := confirmMigration(in, out, *checkOnly, check)
+					if confirmErr != nil {
+						return reportError(diagnostics, "schemigo: "+safeError(confirmErr, *dsn))
+					}
+					if !proceed {
 						return 0
 					}
 				}
+				if u.Scheme == "clickhouse" {
+					var locker clickhouse.Locker
+					locker, err = clickhouse.NewKeeperLocker(ctx, strings.Split(*keeper, ","), "/schemigo")
+					if err != nil {
+						return reportError(diagnostics, "schemigo: "+safeError(err, *dsn))
+					}
+					defer locker.Close()
+					driver = clickhouse.New(locker)
+				}
+				err = schemigo.Apply(ctx, db, driver, *schemaName, desired, schemigo.ApplyOptions{NoBackup: *noBackup, ExpectedHash: plan.SHA256()})
 				if err == nil {
-					if u.Scheme == "clickhouse" {
-						var locker clickhouse.Locker
-						locker, err = clickhouse.NewKeeperLocker(ctx, strings.Split(*keeper, ","), "/schemigo")
-						if err != nil {
-							fmt.Fprintln(diagnostics, "schemigo:", safeError(err, *dsn))
-							return 1
-						}
-						defer locker.Close()
-						driver = clickhouse.New(locker)
-					}
-					err = schemigo.Apply(ctx, db, driver, *schemaName, desired, schemigo.ApplyOptions{NoBackup: *noBackup, ExpectedHash: plan.SHA256()})
-					if err == nil {
-						fmt.Fprintln(out, "Applied.")
-					}
+					fmt.Fprintln(out, "Applied.")
 				}
 			}
 		}
 	}
 	if err != nil {
-		fmt.Fprintln(diagnostics, "schemigo:", safeError(err, *dsn))
-		return 1
+		return reportError(diagnostics, "schemigo: "+safeError(err, *dsn))
 	}
 	return 0
 }
@@ -168,21 +169,55 @@ func safeError(err error, dsn string) string {
 	return message
 }
 
-var sqlKeywords = regexp.MustCompile(`(?im)^(\s*)(CREATE|ALTER|DROP|SELECT|INSERT|UPDATE|DELETE|DO|GRANT|REVOKE|COMMENT|VALIDATE|SET|RESET)(\b)`)
-
-func printSQL(out io.Writer, sql string) error {
-	file, ok := out.(*os.File)
-	if !ok || os.Getenv("NO_COLOR") != "" {
-		_, err := fmt.Fprint(out, sql)
-		return err
+func confirmMigration(in io.Reader, out io.Writer, checkOnly bool, check func() error) (bool, error) {
+	fd, terminal := term.GetFdInfo(out)
+	color := terminal && useColor()
+	separator := ""
+	if terminal {
+		columns := 60
+		if size, err := term.GetWinsize(fd); err == nil && size.Width > 0 {
+			columns = min(columns, int(size.Width))
+		}
+		separator = strings.Repeat("─", columns) + "\n"
 	}
-	info, err := file.Stat()
-	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
-		_, err := fmt.Fprint(out, sql)
-		return err
+	reader := bufio.NewReader(in)
+	ask := func(prompt string) (string, error) {
+		if _, err := io.WriteString(out, separator+prompt); err != nil {
+			return "", err
+		}
+		answer, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+		return strings.ToLower(strings.TrimSpace(answer)), nil
 	}
-	_, err = fmt.Fprint(out, sqlKeywords.ReplaceAllString(sql, "${1}\x1b[36m${2}\x1b[0m${3}"))
-	return err
+	cancel := func() (bool, error) {
+		_, err := fmt.Fprintln(out, "Cancelled.")
+		return false, err
+	}
+	if !checkOnly {
+		answer, err := ask(migrationPrompt(check != nil, color))
+		if err != nil || answer == "y" {
+			return answer == "y", err
+		}
+		if check == nil || answer != "c" && answer != "check" {
+			return cancel()
+		}
+	}
+	if err := check(); err != nil {
+		return false, fmt.Errorf("check migration: %w", err)
+	}
+	if _, err := fmt.Fprintln(out, "Migration check passed. Transaction rolled back."); err != nil {
+		return false, err
+	}
+	if checkOnly {
+		return false, nil
+	}
+	answer, err := ask(migrationPrompt(false, color))
+	if err != nil || answer == "y" {
+		return answer == "y", err
+	}
+	return cancel()
 }
 
 func visitedFlag(flags *flag.FlagSet, name string) bool {

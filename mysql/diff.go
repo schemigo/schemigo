@@ -102,6 +102,13 @@ func validateMySQLSchema(schema schemigo.Schema) error {
 				return fmt.Errorf("table %q index %q: unsupported index options", table.Name, index.Name)
 			}
 		}
+		for _, fk := range table.ForeignKeys {
+			deleteDefault := canonicalForeignKeyAction(fk.OnDelete) == schemigo.SetDefault
+			updateDefault := canonicalForeignKeyAction(fk.OnUpdate) == schemigo.SetDefault
+			if deleteDefault || updateDefault {
+				return fmt.Errorf("table %q foreign key %q: SET DEFAULT is unsupported in MySQL", table.Name, fk.Name)
+			}
+		}
 	}
 	for _, view := range schema.Views {
 		if strings.EqualFold(view.Name, "schema_migrations") {

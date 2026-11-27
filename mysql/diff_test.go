@@ -160,6 +160,44 @@ func TestDiffDropsForeignKeysBeforeTables(t *testing.T) {
 	}
 }
 
+func TestDiffForeignKeyActions(t *testing.T) {
+	t.Parallel()
+	fk := schemigo.NewForeignKey("fk_customer", "customer_id", "customer", "id").
+		WithOnUpdate(schemigo.Cascade).
+		WithOnDelete(schemigo.Restrict)
+	desired := schemigo.Schema{Name: "app", Tables: []schemigo.Table{
+		{Name: "customer", Columns: []schemigo.Column{{Name: "id", Type: mysql.BigInt, PrimaryKey: true}}},
+		{
+			Name:        "orders",
+			Columns:     []schemigo.Column{{Name: "customer_id", Type: mysql.BigInt}},
+			ForeignKeys: []schemigo.ForeignKey{fk},
+		},
+	}}
+	driver := mysql.New()
+	plan, err := driver.Diff(t.Context(), nil, schemigo.Schema{Name: "app"}, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.SQL(), "ON DELETE RESTRICT ON UPDATE CASCADE") {
+		t.Fatalf("wrong foreign key actions: %s", plan.SQL())
+	}
+
+	current, err := schemigo.Normalize(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.Tables[1].ForeignKeys[0].OnDelete = ""
+	plan, err = driver.Diff(t.Context(), nil, current, desired)
+	if err != nil || len(plan.Statements) != 0 {
+		t.Fatalf("implicit RESTRICT produced a diff: %s, err=%v", plan.SQL(), err)
+	}
+
+	desired.Tables[1].ForeignKeys[0] = fk.WithOnDelete(schemigo.SetDefault)
+	if _, err := driver.Diff(t.Context(), nil, current, desired); err == nil || !strings.Contains(err.Error(), "SET DEFAULT") {
+		t.Fatalf("expected SET DEFAULT to be rejected, got %v", err)
+	}
+}
+
 func TestDiffDropsChangedViewBeforeColumnRename(t *testing.T) {
 	current := schemigo.Schema{Name: "app", Tables: []schemigo.Table{{Name: "users", Columns: []schemigo.Column{{Name: "old_name", Type: "varchar(32)"}}}}, Views: []schemigo.View{{Name: "names", Definition: "SELECT old_name FROM users"}}}
 	desired := schemigo.Schema{Name: "app", Tables: []schemigo.Table{{Name: "users", Columns: []schemigo.Column{{Name: "new_name", Type: "varchar(32)"}}}}, Views: []schemigo.View{{Name: "names", Definition: "SELECT new_name FROM users"}}}

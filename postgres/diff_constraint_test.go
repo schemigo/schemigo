@@ -45,10 +45,14 @@ func TestDiffForeignKey(t *testing.T) {
 	parent := simpleTable("z_parent")
 	parent.PrimaryKey = []string{"id"}
 	child := simpleTable("a_child")
-	child.ForeignKeys = []schemigo.ForeignKey{{Name: "parent_fk", Columns: []string{"id"}, ReferencedTable: parent.Name, ReferencedColumns: []string{"id"}, OnDelete: "CASCADE"}}
+	child.ForeignKeys = []schemigo.ForeignKey{
+		schemigo.NewForeignKey("parent_fk", "id", parent.Name, "id").
+			WithOnDelete(schemigo.Cascade).
+			WithOnUpdate(schemigo.Restrict),
+	}
 	p := tablePlan(t, tableSchema(), tableSchema(child, parent))
 	sql := p.SQL()
-	if !strings.Contains(sql, `ADD CONSTRAINT "parent_fk" FOREIGN KEY ("id") REFERENCES "public"."z_parent" ("id") ON DELETE CASCADE ON UPDATE NO ACTION`) {
+	if !strings.Contains(sql, `ADD CONSTRAINT "parent_fk" FOREIGN KEY ("id") REFERENCES "public"."z_parent" ("id") ON DELETE CASCADE ON UPDATE RESTRICT`) {
 		t.Fatal(sql)
 	}
 	if strings.LastIndex(sql, "CREATE TABLE") > strings.Index(sql, "ADD CONSTRAINT") {
