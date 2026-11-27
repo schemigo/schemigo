@@ -14,19 +14,17 @@ import (
 func runScaffold(ctx context.Context, args []string, out, diagnostics io.Writer) int {
 	command := args[0]
 	flags := flag.NewFlagSet("schemigo "+command, flag.ContinueOnError)
-	flags.SetOutput(diagnostics)
 	dir := flags.String("dir", "./schema", "Go schema directory")
 	schemaName := flags.String("schema", "public", "database schema for a new directory")
 	var materialized *bool
 	if command == "view" {
 		materialized = flags.Bool("materialized", false, "create a materialized view")
 	}
-	if err := flags.Parse(args[1:]); err != nil {
+	if err := parseFlags(flags, args[1:], diagnostics); err != nil {
 		return 1
 	}
 	if flags.NArg() != 2 {
-		fmt.Fprintf(diagnostics, "schemigo %s: expected name and definition\n", command)
-		return 1
+		return reportError(diagnostics, "schemigo "+command+": expected name and definition")
 	}
 	name, definition := flags.Arg(0), flags.Arg(1)
 	addition := schemigo.Schema{Name: *schemaName}
@@ -63,8 +61,7 @@ func runScaffold(ctx context.Context, args []string, out, diagnostics io.Writer)
 		err = schemigo.Scaffold(ctx, *dir, addition)
 	}
 	if err != nil {
-		fmt.Fprintln(diagnostics, "schemigo:", err)
-		return 1
+		return reportError(diagnostics, "schemigo: "+err.Error())
 	}
 	fmt.Fprintf(out, "Created %s %s in %s\n", command, name, *dir)
 	return 0

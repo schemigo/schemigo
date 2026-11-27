@@ -49,10 +49,11 @@ func TestCLIPostgresWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(allPath, []byte(strings.Replace(string(all), "[]Table{}", "[]Table{Users}", 1)), 0644); err != nil {
+	usersOnly := strings.Replace(string(all), "[]Table{}", "[]Table{Users}", 1)
+	if err := os.WriteFile(allPath, []byte(usersOnly), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if code, out, diagnostic := call("", "-dry-run"); code != 0 || !strings.Contains(out, "CREATE TABLE") || strings.Contains(out, "[Y/n]") {
+	if code, out, diagnostic := call("", "-dry-run"); code != 0 || !strings.Contains(out, "CREATE TABLE") || strings.Contains(out, "Apply migration?") {
 		t.Fatalf("dry-run code=%d out=%q err=%q", code, out, diagnostic)
 	}
 	var outputError bytes.Buffer
@@ -63,10 +64,38 @@ func TestCLIPostgresWorkflow(t *testing.T) {
 	if err := db.QueryRowContext(t.Context(), `SELECT pg_catalog.to_regclass('public.schema_migrations') IS NOT NULL`).Scan(&historyTable); err != nil || historyTable {
 		t.Fatalf("dry-run changed history=%v err=%v", historyTable, err)
 	}
-	if code, out, diagnostic := call("n\n"); code != 0 || !strings.Contains(out, "[Y/n]") || diagnostic != "" {
+	if code, out, diagnostic := call("n\n"); code != 0 || !strings.Contains(out, "(y = apply, n = cancel, c = check)") || diagnostic != "" {
 		t.Fatalf("decline code=%d out=%q err=%q", code, out, diagnostic)
 	}
-	if code, out, diagnostic := call("Y\n"); code != 0 || !strings.Contains(out, "Applied.") || diagnostic != "" {
+	if code, out, diagnostic := call("", "-check"); code != 0 || !strings.Contains(out, "Transaction rolled back.") ||
+		strings.Contains(out, "Apply migration?") || diagnostic != "" {
+		t.Fatalf("check-only code=%d out=%q err=%q", code, out, diagnostic)
+	}
+	if code, out, diagnostic := call("c\nn\n"); code != 0 ||
+		!strings.Contains(out, "Transaction rolled back.\nApply migration? (y = apply, n = cancel): Cancelled.") || diagnostic != "" {
+		t.Fatalf("check then decline code=%d out=%q err=%q", code, out, diagnostic)
+	}
+	broken := strings.Replace(string(all), "[]Table{}", `[]Table{Users, {
+		Name: "zz_broken", Columns: []Column{{Name: "id", Type: "missing_test_column_type"}},
+	}}`, 1)
+	if err := os.WriteFile(allPath, []byte(broken), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, diagnostic := call("c\nY\n"); code != 1 || !strings.Contains(diagnostic, "check migration:") ||
+		!strings.Contains(diagnostic, "statement 2 of 2") || !strings.Contains(diagnostic, "missing_test_column_type") ||
+		strings.Count(out, "Apply migration?") != 1 {
+		t.Fatalf("failed check code=%d out=%q err=%q", code, out, diagnostic)
+	}
+	var changed bool
+	err = db.QueryRowContext(t.Context(), `SELECT pg_catalog.to_regclass('public.users') IS NOT NULL
+		OR pg_catalog.to_regclass('public.schema_migrations') IS NOT NULL`).Scan(&changed)
+	if err != nil || changed {
+		t.Fatalf("check changed schema or history=%v err=%v", changed, err)
+	}
+	if err := os.WriteFile(allPath, []byte(usersOnly), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, diagnostic := call("c\nY\n"); code != 0 || !strings.Contains(out, "Applied.") || diagnostic != "" {
 		t.Fatalf("apply code=%d out=%q err=%q", code, out, diagnostic)
 	}
 	if code, out, diagnostic := call("", "-history"); code != 0 || !strings.Contains(out, "schemigo") || diagnostic != "" {
@@ -76,7 +105,7 @@ func TestCLIPostgresWorkflow(t *testing.T) {
 		t.Fatalf("no-op code=%d out=%q err=%q", code, out, diagnostic)
 	}
 	writeUser(true)
-	if code, out, diagnostic := call("", "-yes", "-no-backup"); code != 0 || !strings.Contains(out, "Applied.") || strings.Contains(out, "[Y/n]") || diagnostic != "" {
+	if code, out, diagnostic := call("", "-yes", "-no-backup"); code != 0 || !strings.Contains(out, "Applied.") || strings.Contains(out, "Apply migration?") || diagnostic != "" {
 		t.Fatalf("yes code=%d out=%q err=%q", code, out, diagnostic)
 	}
 	var emailPresent bool

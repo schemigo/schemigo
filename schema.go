@@ -95,6 +95,42 @@ type ForeignKey struct {
 	OnUpdate          string   `json:"on_update"`
 }
 
+const (
+	// Cascade propagates the referenced row's change to dependent rows.
+	Cascade = "CASCADE"
+	// Restrict rejects changes to a referenced key while dependent rows exist.
+	Restrict = "RESTRICT"
+	// NoAction requires the constraint to hold at the time it is checked.
+	NoAction = "NO ACTION"
+	// SetNull sets the foreign key columns of dependent rows to NULL.
+	SetNull = "SET NULL"
+	// SetDefault sets the foreign key columns to their defaults in PostgreSQL.
+	SetDefault = "SET DEFAULT"
+)
+
+// NewForeignKey builds a single-column foreign key with the database's default actions.
+// Use a ForeignKey literal to declare a composite key.
+func NewForeignKey(name, column, referencedTable, referencedColumn string) ForeignKey {
+	return ForeignKey{
+		Name:              name,
+		Columns:           []string{column},
+		ReferencedTable:   referencedTable,
+		ReferencedColumns: []string{referencedColumn},
+	}
+}
+
+// WithOnUpdate returns a copy with the given ON UPDATE action.
+func (fk ForeignKey) WithOnUpdate(action string) ForeignKey {
+	fk.OnUpdate = action
+	return fk
+}
+
+// WithOnDelete returns a copy with the given ON DELETE action.
+func (fk ForeignKey) WithOnDelete(action string) ForeignKey {
+	fk.OnDelete = action
+	return fk
+}
+
 // Check describes a named constraint with a raw SQL Expression.
 type Check struct {
 	Name       string `json:"name"`

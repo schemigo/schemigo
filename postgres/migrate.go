@@ -3,8 +3,10 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"hash/fnv"
+	"time"
 
 	"github.com/schemigo/schemigo"
 )
@@ -57,6 +59,81 @@ func (*Driver) Lock(ctx context.Context, conn *sql.Conn, schema string) (schemig
 		}
 		return nil
 	}, nil
+}
+
+// CheckMigration rebuilds the plan under the migration lock and executes it
+// in one transaction that is rolled back. Plans requiring autocommit are rejected.
+// expectedHash, when set, must match the current plan. SQL that advances existing
+// sequences or invokes external systems can have effects beyond the transaction.
+func (d *Driver) CheckMigration(ctx context.Context, db *sql.DB, schema string, desired schemigo.Schema, expectedHash string) (err error) {
+	if db == nil {
+		return fmt.Errorf("database is required")
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection: %w", err)
+	}
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close connection: %w", closeErr))
+		}
+	}()
+	unlock, err := d.Lock(ctx, conn, schema)
+	if err != nil {
+		return fmt.Errorf("lock: %w", err)
+	}
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if unlockErr := unlock(unlockCtx); unlockErr != nil {
+			err = errors.Join(err, fmt.Errorf("unlock: %w", unlockErr))
+		}
+	}()
+
+	current, err := d.Inspect(ctx, conn, schema)
+	if err != nil {
+		return fmt.Errorf("inspect: %w", err)
+	}
+	plan, err := d.Diff(ctx, conn, current, desired)
+	if err != nil {
+		return fmt.Errorf("diff: %w", err)
+	}
+	if expectedHash != "" && plan.SHA256() != expectedHash {
+		return fmt.Errorf("plan changed after preview; review the SQL again")
+	}
+	for i, statement := range plan.Statements {
+		if statement.OutsideTransaction {
+			return fmt.Errorf("statement %d requires execution outside a transaction", i+1)
+		}
+	}
+	if len(plan.Statements) == 0 {
+		return nil
+	}
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			err = errors.Join(err, fmt.Errorf("roll back transaction: %w", rollbackErr))
+		}
+	}()
+	for i, statement := range plan.Statements {
+		// Preparing limits each statement to a single top-level SQL command.
+		stmt, err := tx.PrepareContext(ctx, statement.SQL)
+		if err != nil {
+			return fmt.Errorf("prepare statement %d of %d: %w", i+1, len(plan.Statements), err)
+		}
+		_, execErr := stmt.ExecContext(ctx)
+		if err := errors.Join(execErr, stmt.Close()); err != nil {
+			return fmt.Errorf("execute statement %d of %d: %w", i+1, len(plan.Statements), err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "SET CONSTRAINTS ALL IMMEDIATE"); err != nil {
+		return fmt.Errorf("check deferred constraints: %w", err)
+	}
+	return ctx.Err()
 }
 
 // EnsureHistory creates the migration log inside the managed namespace.

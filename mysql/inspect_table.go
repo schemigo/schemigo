@@ -115,7 +115,12 @@ ORDER BY k.constraint_name, k.ordinal_position`, schema, name)
 			return table, err
 		}
 		if len(table.ForeignKeys) == 0 || table.ForeignKeys[len(table.ForeignKeys)-1].Name != constraint {
-			table.ForeignKeys = append(table.ForeignKeys, schemigo.ForeignKey{Name: constraint, ReferencedTable: target, OnDelete: defaultAction(onDelete), OnUpdate: defaultAction(onUpdate)})
+			table.ForeignKeys = append(table.ForeignKeys, schemigo.ForeignKey{
+				Name:            constraint,
+				ReferencedTable: target,
+				OnDelete:        canonicalForeignKeyAction(onDelete),
+				OnUpdate:        canonicalForeignKeyAction(onUpdate),
+			})
 		}
 		fk := &table.ForeignKeys[len(table.ForeignKeys)-1]
 		fk.Columns = append(fk.Columns, column)
@@ -159,8 +164,9 @@ func isStringType(columnType string) bool {
 	return false
 }
 
-func defaultAction(action string) string {
-	if action == "RESTRICT" || action == "NO ACTION" {
+func canonicalForeignKeyAction(action string) string {
+	action = strings.ToUpper(strings.Join(strings.Fields(action), " "))
+	if action == schemigo.Restrict || action == schemigo.NoAction {
 		return ""
 	}
 	return action

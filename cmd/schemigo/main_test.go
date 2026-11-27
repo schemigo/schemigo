@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/schemigo/schemigo"
 )
 
 type failingWriter struct{}
@@ -13,14 +15,15 @@ type failingWriter struct{}
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("output closed") }
 
 func TestPrintSQLReportsWriteError(t *testing.T) {
-	if err := printSQL(failingWriter{}, "SELECT 1\n"); err == nil {
+	plan := schemigo.Plan{Statements: []schemigo.Statement{{SQL: "SELECT 1"}}}
+	if err := printSQL(failingWriter{}, plan, "postgres"); err == nil {
 		t.Fatal("SQL output error was ignored")
 	}
 }
 
 func TestRunRequiresDSN(t *testing.T) {
 	var out, diagnostics bytes.Buffer
-	if code := run(t.Context(), nil, strings.NewReader(""), &out, &diagnostics); code != 1 || !strings.Contains(diagnostics.String(), "-d") {
+	if code := run(t.Context(), nil, strings.NewReader(""), &out, &diagnostics); code != 1 || diagnostics.String() != "schemigo: -d is required\n" {
 		t.Fatalf("code=%d stderr=%q", code, diagnostics.String())
 	}
 }
@@ -58,6 +61,17 @@ func TestRunErrorsReturnOne(t *testing.T) {
 		if code := run(t.Context(), args, strings.NewReader(""), &out, &diagnostics); code != 1 || diagnostics.Len() == 0 || strings.Contains(diagnostics.String(), "topsecret") {
 			t.Fatalf("args=%v code=%d stderr=%q", args, code, diagnostics.String())
 		}
+	}
+}
+
+func TestConfirmMigrationStopsOnFailedCheck(t *testing.T) {
+	t.Parallel()
+	var out strings.Builder
+	failure := errors.New("relation does not exist")
+	proceed, err := confirmMigration(strings.NewReader("c\ny\n"), &out, false, func() error { return failure })
+	if proceed || !errors.Is(err, failure) || !strings.Contains(err.Error(), "check migration:") ||
+		out.String() != "Apply migration? (y = apply, n = cancel, c = check): " {
+		t.Fatalf("proceed=%v output=%q error=%v", proceed, out.String(), err)
 	}
 }
 

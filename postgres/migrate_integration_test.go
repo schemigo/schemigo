@@ -38,6 +38,28 @@ func (d *failingUnlockDriver) Lock(ctx context.Context, conn *sql.Conn, schema s
 	}, nil
 }
 
+func TestCheckMigrationRejectsAutocommitPlan(t *testing.T) {
+	db := testdb.Postgres(t)
+	if _, err := db.ExecContext(t.Context(), "CREATE TYPE public.status AS ENUM ('old')"); err != nil {
+		t.Fatal(err)
+	}
+	desired := tableSchema(simpleTable("users"))
+	desired.Enums = []schemigo.Enum{{Name: "status", Values: []string{"old", "new"}}}
+	driver := &postgres.Driver{}
+	plan, err := schemigo.PlanMigration(t.Context(), db, driver, "public", desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = driver.CheckMigration(t.Context(), db, "public", desired, plan.SHA256())
+	if err == nil || !strings.Contains(err.Error(), "requires execution outside a transaction") {
+		t.Fatalf("autocommit check: %v", err)
+	}
+	after, err := schemigo.PlanMigration(t.Context(), db, driver, "public", desired)
+	if err != nil || after.SHA256() != plan.SHA256() {
+		t.Fatalf("check changed plan: %v, %v", after, err)
+	}
+}
+
 func TestApplyKeepsSnapshotOnUnlockError(t *testing.T) {
 	db := testdb.Postgres(t)
 	backup, err := os.MkdirTemp(".", "_schemigo_backup_")
